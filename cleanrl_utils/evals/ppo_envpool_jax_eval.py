@@ -85,7 +85,12 @@ def evaluate(
 if __name__ == "__main__":
     from huggingface_hub import hf_hub_download
 
-    from cleanrl.ppo_atari_envpool_xla_jax_scan import Actor, Critic, Network, make_env
+    from cleanba.cleanba_ppo_envpool_impala_atari_wrapper import (
+        Actor,
+        Critic,
+        Network,
+        make_env,
+    )
 
     model_path = hf_hub_download(
         repo_id="vwxyzjn/Pong-v5-ppo_atari_envpool_xla_jax_scan-seed1", filename="ppo_atari_envpool_xla_jax_scan.cleanrl_model"
