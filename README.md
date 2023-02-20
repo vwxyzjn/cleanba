@@ -19,6 +19,7 @@ Cleanba is CleanRL's implementation of DeepMind's Sebulba distributed training f
 
 **Scalable**: We can scale to N+ GPUs allowed by `jax.distributed` and memory (e.g., it can run with 16 GPUs). This makes cleanba suited for large-scale distributed training tasks such as RLHF.
 
+**Understandable**: We adopt the single-file implementation philosophy used in CleanRL, making our core codebase succinct and easy to understand. For example, our `cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py` is ~800 lines of code.
 
 
 
