@@ -6,7 +6,6 @@ import uuid
 from collections import deque
 from distutils.util import strtobool
 from functools import partial
-from typing import Sequence
 
 os.environ[
     "XLA_PYTHON_CLIENT_MEM_FRACTION"
