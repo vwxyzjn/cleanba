@@ -141,3 +141,7 @@ To improve efficiency of Cleanba, we uses JAX and EnvPool, both of which are des
 [Espeholt et al., 2018](https://arxiv.org/abs/1802.01561) did not disclose the hardware usage and runtime for the Atari experiments. We did our best to recover its runtime by interpolating the results from the [R2D2 paper](https://openreview.net/pdf?id=r1lyTjAqYX) and found IMPALA (deep) takes ~2 hours.
 
 ![](static/r2d2_impala.png)
+
+## Acknowledgements
+
+We thank [Stability AI's HPC](https://github.com/Stability-AI/stability-hpc) for generously providing the computational resources for this project.
