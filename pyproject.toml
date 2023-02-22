@@ -22,6 +22,8 @@ wandb = "^0.13.10"
 tensorboardx = "^2.5.1"
 chex = "0.1.5"
 gym = "0.23.1"
+opencv-python = "^4.7.0.68"
+moviepy = "^1.0.3"
 
 
 [tool.poetry.group.dev.dependencies]

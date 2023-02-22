@@ -57,29 +57,29 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--env-id", type=str, default="BigfishHard-v0",
         help="the id of the environment")
-    parser.add_argument("--total-timesteps", type=int, default=50000000,
+    parser.add_argument("--total-timesteps", type=int, default=100000000,
         help="total timesteps of the experiments")
-    parser.add_argument("--learning-rate", type=float, default=2.5e-4,
+    parser.add_argument("--learning-rate", type=float, default=5e-4,
         help="the learning rate of the optimizer")
     parser.add_argument("--local-num-envs", type=int, default=60,
         help="the number of parallel game environments")
     parser.add_argument("--async-batch-size", type=int, default=20,
         help="the envpool's batch size in the async mode")
-    parser.add_argument("--num-steps", type=int, default=128,
+    parser.add_argument("--num-steps", type=int, default=256,
         help="the number of steps to run in each environment per policy rollout")
-    parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+    parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="Toggle learning rate annealing for policy and value networks")
-    parser.add_argument("--gamma", type=float, default=0.99,
+    parser.add_argument("--gamma", type=float, default=0.999,
         help="the discount factor gamma")
     parser.add_argument("--gae-lambda", type=float, default=0.95,
         help="the lambda for the general advantage estimation")
-    parser.add_argument("--num-minibatches", type=int, default=4,
+    parser.add_argument("--num-minibatches", type=int, default=8,
         help="the number of mini-batches")
-    parser.add_argument("--update-epochs", type=int, default=4,
+    parser.add_argument("--update-epochs", type=int, default=3,
         help="the K epochs to update the policy")
     parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggles advantages normalization")
-    parser.add_argument("--clip-coef", type=float, default=0.1,
+    parser.add_argument("--clip-coef", type=float, default=0.2,
         help="the surrogate clipping coefficient")
     parser.add_argument("--ent-coef", type=float, default=0.01,
         help="coefficient of the entropy")
@@ -786,7 +786,7 @@ if __name__ == "__main__":
                 )
             )
         print(f"model saved to {model_path}")
-        from cleanrl_utils.evals.ppo_envpool_jax_eval import evaluate
+        from cleanrl_utils.evals.cleanba_ppo_envpool_procgen_eval import evaluate
 
         episodic_returns = evaluate(
             model_path,
