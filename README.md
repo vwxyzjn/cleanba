@@ -134,6 +134,9 @@ To improve efficiency of Cleanba, we uses JAX and EnvPool, both of which are des
 
 ![](static/r2d2_impala.png)
 
+[SEED RL's R2D2](https://github.com/google-research/seed_rl)'s performance is extracted from its [paper](https://arxiv.org/abs/1910.06591):
+![](static/r2d2.png)
+
 ## Acknowledgements
 
 We thank [Stability AI's HPC](https://github.com/Stability-AI/stability-hpc) for generously providing the computational resources for this project.
