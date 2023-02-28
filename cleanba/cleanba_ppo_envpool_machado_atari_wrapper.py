@@ -413,12 +413,13 @@ def rollout(
         # `make_bulk_array` is actually important. It accumulates the data from the lists
         # into single bulk arrays, which later makes transfering the data to the learner's
         # device slightly faster. See https://wandb.ai/costa-huang/cleanRL/reports/data-transfer-optimization--VmlldzozNjU5MTg1
-        obs, values, actions, logprobs = make_bulk_array(
-            obs,
-            values,
-            actions,
-            logprobs,
-        )
+        if args.learner_device_ids[0] != args.actor_device_ids[0]:
+            obs, values, actions, logprobs = make_bulk_array(
+                obs,
+                values,
+                actions,
+                logprobs,
+            )
 
         payload = (
             global_step,
