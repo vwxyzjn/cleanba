@@ -398,7 +398,7 @@ def rollout(
         writer.add_scalar("stats/storage_time", storage_time, global_step)
         writer.add_scalar("stats/env_send_time", env_send_time, global_step)
         # `make_bulk_array` is actually important. It accumulates the data from the lists
-        # into single bulk arrays, which later makes transfering the data to the learner's
+        # into single bulk arrays, which later makes transferring the data to the learner's
         # device slightly faster. See https://wandb.ai/costa-huang/cleanRL/reports/data-transfer-optimization--VmlldzozNjU5MTg1
         if args.learner_device_ids[0] != args.actor_device_ids[0]:
             obs, values, actions, logprobs = make_bulk_array(
@@ -738,7 +738,11 @@ if __name__ == "__main__":
             ) = rollout_queue.get()
             rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
             writer.add_scalar("stats/rollout_queue_get_time", np.mean(rollout_queue_get_time), global_step)
-            writer.add_scalar("stats/rollout_params_queue_get_time_diff", np.mean(rollout_queue_get_time) - avg_params_queue_get_time, global_step)
+            writer.add_scalar(
+                "stats/rollout_params_queue_get_time_diff",
+                np.mean(rollout_queue_get_time) - avg_params_queue_get_time,
+                global_step,
+            )
 
         data_transfer_time_start = time.time()
         b_obs, b_actions, b_logprobs, b_advantages, b_returns = prepare_data(
