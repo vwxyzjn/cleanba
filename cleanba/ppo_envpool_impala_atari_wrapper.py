@@ -119,40 +119,53 @@ def make_env(env_id, seed, num_envs, async_batch_size=1):
     return thunk
 
 
+
+class ResidualBlock(nn.Module):
+    channels: int
+
+    @nn.compact
+    def __call__(self, x):
+        inputs = x
+        x = nn.relu(x)
+        x = nn.Conv(
+            self.channels,
+            kernel_size=(3, 3),
+        )(x)
+        x = nn.relu(x)
+        x = nn.Conv(
+            self.channels,
+            kernel_size=(3, 3),
+        )(x)
+        return x + inputs
+
+
+class ConvSequence(nn.Module):
+    channels: int
+
+    @nn.compact
+    def __call__(self, x):
+        x = nn.Conv(
+            self.channels,
+            kernel_size=(3, 3),
+        )(x)
+        x = nn.max_pool(x, window_shape=(3, 3), strides=(2, 2), padding="SAME")
+        x = ResidualBlock(self.channels)(x)
+        x = ResidualBlock(self.channels)(x)
+        return x
+
+
 class Network(nn.Module):
+    channelss: Sequence[int] = (16, 32, 32)
+
     @nn.compact
     def __call__(self, x):
         x = jnp.transpose(x, (0, 2, 3, 1))
         x = x / (255.0)
-        x = nn.Conv(
-            32,
-            kernel_size=(8, 8),
-            strides=(4, 4),
-            padding="VALID",
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0),
-        )(x)
-        x = nn.relu(x)
-        x = nn.Conv(
-            64,
-            kernel_size=(4, 4),
-            strides=(2, 2),
-            padding="VALID",
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0),
-        )(x)
-        x = nn.relu(x)
-        x = nn.Conv(
-            64,
-            kernel_size=(3, 3),
-            strides=(1, 1),
-            padding="VALID",
-            kernel_init=orthogonal(np.sqrt(2)),
-            bias_init=constant(0.0),
-        )(x)
+        for channels in self.channelss:
+            x = ConvSequence(channels)(x)
         x = nn.relu(x)
         x = x.reshape((x.shape[0], -1))
-        x = nn.Dense(512, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
+        x = nn.Dense(256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
         x = nn.relu(x)
         return x
 
@@ -164,7 +177,7 @@ class Critic(nn.Module):
 
 
 class Actor(nn.Module):
-    action_dim: Sequence[int]
+    action_dim: int
 
     @nn.compact
     def __call__(self, x):

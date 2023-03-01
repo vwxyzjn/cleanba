@@ -212,7 +212,7 @@ class AgentParams:
 
 @partial(jax.jit, static_argnums=(3))
 def get_action_and_value(
-    params: TrainState,
+    params: flax.core.FrozenDict,
     next_obs: np.ndarray,
     key: jax.random.PRNGKey,
     action_dim: int,
