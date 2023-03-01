@@ -27,6 +27,8 @@ def parse_args():
         help="the path to the slurm template file (see docs for more details)")
     parser.add_argument("--slurm-gpus-per-task", type=int, default=1,
         help="the number of gpus per task to use for slurm jobs")
+    parser.add_argument("--slurm-cpus-per-gpu", type=int, default=12,
+        help="the number of gpus per task to use for slurm jobs")
     parser.add_argument("--slurm-ntasks", type=int, default=1,
         help="the number of tasks to use for slurm jobs")
     parser.add_argument("--slurm-nodes", type=int, default=None,
@@ -118,6 +120,7 @@ if __name__ == "__main__":
         slurm_template = slurm_template.replace("{{len_seeds}}", f"{args.num_seeds}")
         slurm_template = slurm_template.replace("{{command}}", args.command)
         slurm_template = slurm_template.replace("{{gpus_per_task}}", f"{args.slurm_gpus_per_task}")
+        slurm_template = slurm_template.replace("{{cpus_per_gpu}}", f"{args.slurm_cpus_per_gpu}")
         slurm_template = slurm_template.replace("{{ntasks}}", f"{args.slurm_ntasks}")
         if args.slurm_nodes is not None:
             slurm_template = slurm_template.replace("{{nodes}}", f"#SBATCH --nodes={args.slurm_nodes}")

@@ -4,7 +4,7 @@
 #SBATCH --account carperai
 #SBATCH --requeue
 #SBATCH --gpus-per-task={{gpus_per_task}}
-#SBATCH --cpus-per-gpu=12
+#SBATCH --cpus-per-gpu={{cpus_per_gpu}}
 #SBATCH --ntasks={{ntasks}}
 #SBATCH --output=slurm/logs/%x_%j.out
 #SBATCH --array={{array}}
