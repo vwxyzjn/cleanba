@@ -96,7 +96,7 @@ def parse_args():
         help="the device ids that learner workers will use")
     parser.add_argument("--distributed", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to use `jax.distirbuted`")
-    parser.add_argument("--concurrency", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+    parser.add_argument("--concurrency", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="whether to run the actor and learner concurrently")
     parser.add_argument("--profile", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to call block_until_ready() for profiling")
