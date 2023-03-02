@@ -95,6 +95,8 @@ def parse_args():
         help="the device ids that learner workers will use")
     parser.add_argument("--distributed", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to use `jax.distirbuted`")
+    parser.add_argument("--concurrency", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
+        help="whether to run the actor and learner concurrently")
     parser.add_argument("--profile", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to call block_until_ready() for profiling")
     parser.add_argument("--test-actor-learner-throughput", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
@@ -332,9 +334,13 @@ def rollout(
         # concurrently with the learning process. It also ensures the actor's policy version is only 1 step
         # behind the learner's policy version
         params_queue_get_time_start = time.time()
-        if update != 2:
+        if not args.concurrency:
             params = params_queue.get()
             actor_policy_version += 1
+        else:
+            if update != 2:
+                params = params_queue.get()
+                actor_policy_version += 1
         params_queue_get_time.append(time.time() - params_queue_get_time_start)
         writer.add_scalar("stats/params_queue_get_time", np.mean(params_queue_get_time), global_step)
         rollout_time_start = time.time()

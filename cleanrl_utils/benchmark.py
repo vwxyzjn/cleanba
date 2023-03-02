@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import shlex
 import subprocess
@@ -27,7 +28,7 @@ def parse_args():
         help="the path to the slurm template file (see docs for more details)")
     parser.add_argument("--slurm-gpus-per-task", type=int, default=1,
         help="the number of gpus per task to use for slurm jobs")
-    parser.add_argument("--slurm-cpus-per-gpu", type=int, default=12,
+    parser.add_argument("--slurm-total-cpus", type=int, default=50,
         help="the number of gpus per task to use for slurm jobs")
     parser.add_argument("--slurm-ntasks", type=int, default=1,
         help="the number of tasks to use for slurm jobs")
@@ -120,7 +121,9 @@ if __name__ == "__main__":
         slurm_template = slurm_template.replace("{{len_seeds}}", f"{args.num_seeds}")
         slurm_template = slurm_template.replace("{{command}}", args.command)
         slurm_template = slurm_template.replace("{{gpus_per_task}}", f"{args.slurm_gpus_per_task}")
-        slurm_template = slurm_template.replace("{{cpus_per_gpu}}", f"{args.slurm_cpus_per_gpu}")
+        total_gpus = args.slurm_gpus_per_task * args.slurm_ntasks
+        slurm_cpus_per_gpu = math.ceil(args.slurm_total_cpus / total_gpus)
+        slurm_template = slurm_template.replace("{{cpus_per_gpu}}", f"{slurm_cpus_per_gpu}")
         slurm_template = slurm_template.replace("{{ntasks}}", f"{args.slurm_ntasks}")
         if args.slurm_nodes is not None:
             slurm_template = slurm_template.replace("{{nodes}}", f"#SBATCH --nodes={args.slurm_nodes}")
@@ -130,4 +133,5 @@ if __name__ == "__main__":
         open(os.path.join("slurm", f"{filename}.slurm"), "w").write(slurm_template)
         slurm_path = os.path.join("slurm", f"{filename}.slurm")
         print(f"saving command in {slurm_path}")
-        run_experiment(f"sbatch {slurm_path}")
+        if args.workers > 0:
+            run_experiment(f"sbatch {slurm_path}")
