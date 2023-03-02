@@ -79,7 +79,7 @@ python -m cleanrl_utils.benchmark \
 
 ## How does Cleanba work?
 
-Cleanba addresses the reproducibility issue by making ensuring the actor's policy version is always **exactly one step behind the learner's policy version**. The idea is similar to [HTS-RL](https://arxiv.org/abs/2006.14471), but the executions are completely different.
+Cleanba addresses the reproducibility issue by making ensuring the actor's policy version is always **exactly one step behind the learner's policy version**. The idea is similar to [HTS-RL](https://arxiv.org/abs/2012.09849), but the executions are completely different.
 
 Here is a pseudo-code of Cleanba's core idea:
 
