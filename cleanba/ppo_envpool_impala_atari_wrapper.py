@@ -119,7 +119,6 @@ def make_env(env_id, seed, num_envs, async_batch_size=1):
     return thunk
 
 
-
 class ResidualBlock(nn.Module):
     channels: int
 

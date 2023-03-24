@@ -284,7 +284,7 @@ def rollout(
     rewards = []
     truncations = []
     terminations = []
-    firststeps = [] # first step of an episode
+    firststeps = []  # first step of an episode
     for update in range(1, args.num_updates + 2):
         # NOTE: This is a major difference from the sync version:
         # at the end of the rollout phase, the sync version will have the next observation
@@ -298,7 +298,7 @@ def rollout(
         storage_time = 0
         env_send_time = 0
 
-        num_steps_with_bootstrap = args.num_steps + 1 + int(len(obs)==0)
+        num_steps_with_bootstrap = args.num_steps + 1 + int(len(obs) == 0)
         # NOTE: `update != 2` is actually IMPORTANT — it allows us to start running policy collection
         # concurrently with the learning process. It also ensures the actor's policy version is only 1 step
         # behind the learner's policy version
@@ -410,15 +410,15 @@ def rollout(
             global_step,
         )
 
-        obs = obs[-args.async_update:]
-        dones = dones[-args.async_update:]
-        actions = actions[-args.async_update:]
-        logitss = logitss[-args.async_update:]
-        env_ids = env_ids[-args.async_update:]
-        rewards = rewards[-args.async_update:]
-        truncations = truncations[-args.async_update:]
-        terminations = terminations[-args.async_update:]
-        firststeps = firststeps[-args.async_update:]
+        obs = obs[-args.async_update :]
+        dones = dones[-args.async_update :]
+        actions = actions[-args.async_update :]
+        logitss = logitss[-args.async_update :]
+        env_ids = env_ids[-args.async_update :]
+        rewards = rewards[-args.async_update :]
+        truncations = truncations[-args.async_update :]
+        terminations = terminations[-args.async_update :]
+        firststeps = firststeps[-args.async_update :]
 
 
 @partial(jax.jit, static_argnums=(2))
@@ -434,21 +434,22 @@ def get_action_and_value2(
 
 
 def policy_gradient_loss(logits, *args):
-  """rlax.policy_gradient_loss, but with sum(loss) and [T, B, ...] inputs."""
-  mean_per_batch = jax.vmap(rlax.policy_gradient_loss, in_axes=1)(logits, *args)
-  total_loss_per_batch = mean_per_batch * logits.shape[0]
-  return jnp.sum(total_loss_per_batch)
+    """rlax.policy_gradient_loss, but with sum(loss) and [T, B, ...] inputs."""
+    mean_per_batch = jax.vmap(rlax.policy_gradient_loss, in_axes=1)(logits, *args)
+    total_loss_per_batch = mean_per_batch * logits.shape[0]
+    return jnp.sum(total_loss_per_batch)
+
 
 def entropy_loss_fn(logits, *args):
-  """rlax.entropy_loss, but with sum(loss) and [T, B, ...] inputs."""
-  mean_per_batch = jax.vmap(rlax.entropy_loss, in_axes=1)(logits, *args)
-  total_loss_per_batch = mean_per_batch * logits.shape[0]
-  return jnp.sum(total_loss_per_batch)
+    """rlax.entropy_loss, but with sum(loss) and [T, B, ...] inputs."""
+    mean_per_batch = jax.vmap(rlax.entropy_loss, in_axes=1)(logits, *args)
+    total_loss_per_batch = mean_per_batch * logits.shape[0]
+    return jnp.sum(total_loss_per_batch)
 
 
 def impala_loss(params, x, a, logitss, rewards, dones, firststeps, action_dim):
     discounts = (1.0 - dones) * args.gamma
-    mask = (1.0 - firststeps)
+    mask = 1.0 - firststeps
     policy_logits, newvalue = jax.vmap(get_action_and_value2, in_axes=(None, 0, None))(params, x, action_dim)
 
     v_t = newvalue[1:]
@@ -462,11 +463,9 @@ def impala_loss(params, x, a, logitss, rewards, dones, firststeps, action_dim):
     discounts = discounts[:-1]
 
     rhos = rlax.categorical_importance_sampling_ratios(policy_logits, logitss, a)
-    vtrace_td_error_and_advantage = jax.vmap(
-        rlax.vtrace_td_error_and_advantage, in_axes=1, out_axes=1)
+    vtrace_td_error_and_advantage = jax.vmap(rlax.vtrace_td_error_and_advantage, in_axes=1, out_axes=1)
 
-    vtrace_returns = vtrace_td_error_and_advantage(
-        v_tm1, v_t, rewards, discounts, rhos)
+    vtrace_returns = vtrace_td_error_and_advantage(v_tm1, v_t, rewards, discounts, rhos)
     pg_advs = vtrace_returns.pg_advantage
     pg_loss = policy_gradient_loss(policy_logits, a, pg_advs, mask)
 
@@ -492,6 +491,7 @@ def single_device_update(
     key: jax.random.PRNGKey,
 ):
     impala_loss_grad_fn = jax.value_and_grad(impala_loss, has_aux=True)
+
     def update_minibatch(agent_state, minibatch):
         mb_obs, mb_actions, mb_logitss, mb_rewards, mb_dones, mb_firststeps = minibatch
         (loss, (pg_loss, v_loss, entropy_loss)), grads = impala_loss_grad_fn(
@@ -657,8 +657,11 @@ if __name__ == "__main__":
             ) = rollout_queue.get()
             rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
             writer.add_scalar("stats/rollout_queue_get_time", np.mean(rollout_queue_get_time), global_step)
-            writer.add_scalar("stats/rollout_params_queue_get_time_diff", np.mean(rollout_queue_get_time) - avg_params_queue_get_time, global_step)
-
+            writer.add_scalar(
+                "stats/rollout_params_queue_get_time_diff",
+                np.mean(rollout_queue_get_time) - avg_params_queue_get_time,
+                global_step,
+            )
 
         data_transfer_time_start = time.time()
         obs, dones, actions, logitss, firststeps, env_ids, rewards = prepare_data(
@@ -670,7 +673,7 @@ if __name__ == "__main__":
             env_ids,
             rewards,
         )
-        
+
         obs = jnp.array_split(obs, len(learner_devices), axis=1)
         actions = jnp.array_split(actions, len(learner_devices), axis=1)
         logitss = jnp.array_split(logitss, len(learner_devices), axis=1)
