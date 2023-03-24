@@ -100,9 +100,15 @@ python -m cleanrl_utils.benchmark \
 
 ### Reproduction of all of our results.
 
-Please see `benchmark.sh` for the commands to reproduce all of our results. The commands to reproduce the TPU experiments can be found in `tpu.sh`.
+Please see `benchmark.sh` for the commands to reproduce all of our results. 
 
 Almost all the experiments were conducted with the commit [32dbf31d706260b238307f8dfe409adef88ea8f7](`https://github.com/vwxyzjn/cleanba/commit/32dbf31d706260b238307f8dfe409adef88ea8f7`).
+
+The commands to reproduce the TPU experiments can be found in `tpu.sh`. Here is a video demonstrating the orchastration of TPU experiments.
+
+https://user-images.githubusercontent.com/5555347/227632573-137e4d72-4a31-4a06-b9e5-784abebe6c2b.mov
+
+
 
 ## How does Cleanba work?
 
