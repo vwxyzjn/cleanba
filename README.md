@@ -12,14 +12,34 @@ Cleanba is CleanRL's implementation of DeepMind's Sebulba distributed training f
 ## Highlights
 
 
-**Highly reproducible**: More GPUs only make things faster. You can always reproduce the same results with a single GPU.
+**Highly reproducible**: More GPUs only make things faster. You can always reproduce the same results with different hardwares (e.g., different number of GPUs, TPUs).
 
 ![](static/reproducibility.png)
 
-**High-performing**: We can currently achieve 178.24% median human-normalized score across 57 Atari games in ~30 mins, with 8 GPUs (distributed 2 times on 4 GPUs). This is a 4x walltime speedup compared to the IMPALA ([Espeholt et al., 2018](https://arxiv.org/abs/1802.01561)) paper, and a 1.5x speedup compared to the original Sebulba ([Hessel et al., 2021](https://arxiv.org/pdf/2104.06272.pdf)) paper.
+|             | runtime (minutes) in `Breakout-v5` |
+|:------------|------------:|
+| baseline (8 A100) | 30.4671 |
+| a0_l0_d1 (1 A100) | 154.079 |
+| a0_l0_d2 (2 A100) | 93.3155 |
+| a0_l1_d1 (2 A100) | 121.107 |
+| a0_l01_d1 (2 A100) | 101.63 |
+| a0_l1 2_d1 (3 A100) | 70.2993 |
+| a0_l1 2 3_d1 (4 A100) | 52.5321 |
+| a0_l0_d4 (4 A100) | 58.4344 |
+| a0_l1 2 3 4_d1 (5 A100) | 44.8671 |
+| a0_l1 2 3 4 5 6_d1 (7 A100) | 38.4216 |
+| a0_l1 2 3 4 5 6_d1 (7 TPUv3-8 cores) | 124.397 |
+| a0_l1 2_d1 (6 TPUv4 cores ) | 44.4206 |
+| a0_l1_d1 (4 TPUv4 cores) | 54.6161 |
+| a0_l1_d2 (8 TPUv4 cores) | 33.1134 |
+
+**High-performing**: We can currently achieve 178.24% median human-normalized score across 57 Atari games in ~30 mins, with 8 GPUs (distributed 2 times on 4 GPUs). This is one of the shortest training durations compared to prior works.
 
 
-**Scalable**: We can scale to N+ GPUs allowed by `jax.distributed` and memory (e.g., it can run with 16 GPUs). This makes cleanba suited for large-scale distributed training tasks such as RLHF.
+**Scalable**: We can scale to hundreds of GPUs allowed by `jax.distributed` and memory. This makes cleanba suited for large-scale distributed training tasks.
+
+![](static/scalability.png)
+![](static/cleanba_scaling_efficiency.png)
 
 **Understandable**: We adopt the single-file implementation philosophy used in CleanRL, making our core codebase succinct and easy to understand. For example, our `cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py` is ~800 lines of code.
 
@@ -43,21 +63,21 @@ poetry run python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py --help
 ### Experiments:
 
 Let us use `a0-l1,2,3-d1` to denote our setups, where `a0` means actor on GPU 0, `l1,2,3` means learner on GPUs 1,2,3, and `d1` means the computation is distributed 1 time.
-Here are come common setups:
+Here are come common setups. You can also run the commands with `--track` to track the experiments with [Weights & Biases](https://wandb.ai/).
 
 ```
 # a0-l0-d1: single GPU
-python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py --actor-device-ids 0 --learner-device-ids 0 --track
+python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py --actor-device-ids 0 --learner-device-ids 0 --local-num-envs 120 --track
 # a0-l0,1-d1: two GPUs
-python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py --actor-device-ids 0 --learner-device-ids 0 1 --track
+python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py --actor-device-ids 0 --learner-device-ids 0 1 --local-num-envs 120
 # a0-l1,2-d1: three GPUs
-python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py --actor-device-ids 0 --learner-device-ids 1 2 --track
+python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py --actor-device-ids 0 --learner-device-ids 1 2 --local-num-envs 120
 # a0-l1,2,3-d1: four GPUs
-python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py --actor-device-ids 0 --learner-device-ids 1 2 3 --track
+python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py --actor-device-ids 0 --learner-device-ids 1 2 3 --local-num-envs 120
 # a0-l1,2,3,4-d1: five GPUs
-python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py --actor-device-ids 0 --learner-device-ids 1 2 3 4 --track
+python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py --actor-device-ids 0 --learner-device-ids 1 2 3 4 --local-num-envs 120
 # a0-l1,2,3,4,5,6-d1: seven GPUs
-python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py --actor-device-ids 0 --learner-device-ids 1 2 3 4 5 6 --track
+python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py --actor-device-ids 0 --learner-device-ids 1 2 3 4 5 6 --local-num-envs 120
 
 # a0-l0-d2: 8 GPUs (distributed 2 times on 4 GPUs)
 # execute them in separate terminals; here we assume all 8 GPUs are on the same machine
@@ -76,6 +96,13 @@ python -m cleanrl_utils.benchmark \
     --slurm-nodes 1 \
     --slurm-template-path cleanba.slurm_template
 ```
+
+
+### Reproduction of all of our results.
+
+Please see `benchmark.sh` for the commands to reproduce all of our results. The commands to reproduce the TPU experiments can be found in `tpu.sh`.
+
+Almost all the experiments were conducted with the commit [32dbf31d706260b238307f8dfe409adef88ea8f7](`https://github.com/vwxyzjn/cleanba/commit/32dbf31d706260b238307f8dfe409adef88ea8f7`).
 
 ## How does Cleanba work?
 
