@@ -172,4 +172,6 @@ To improve efficiency of Cleanba, we uses JAX and EnvPool, both of which are des
 
 ## Acknowledgements
 
-We thank [Stability AI's HPC](https://github.com/Stability-AI/stability-hpc) for generously providing the computational resources for this project.
+We thank  for generously providing the computational resources for this project.
+
+We thank [Stability AI's HPC](https://github.com/Stability-AI/stability-hpc) for generously providing the GPU computational resources to this project. We also thank [Google's TPU Research Cloud](https://sites.research.google/trc/about/) for providing the TPU computational resources. 
