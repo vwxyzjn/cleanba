@@ -212,7 +212,7 @@ class AgentParams:
     critic_params: flax.core.FrozenDict
 
 
-@partial(jax.jit, static_argnums=(3))
+@partial(jax.jit, static_argnames=("action_dim"))
 def get_action_and_value(
     params: flax.core.FrozenDict,
     next_obs: np.ndarray,
@@ -459,7 +459,7 @@ def rollout(
         )
 
 
-@partial(jax.jit, static_argnums=(3))
+@partial(jax.jit, static_argnames=("action_dim"))
 def get_action_and_value2(
     params: flax.core.FrozenDict,
     x: np.ndarray,
