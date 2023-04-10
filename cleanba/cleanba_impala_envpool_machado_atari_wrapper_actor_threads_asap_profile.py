@@ -246,6 +246,7 @@ def rollout(
     episode_lengths = np.zeros((args.local_num_envs,), dtype=np.float32)
     returned_episode_lengths = np.zeros((args.local_num_envs,), dtype=np.float32)
     envs.async_reset()
+    time.sleep(20 + (0.1382 / (len_actor_device_ids * args.num_actor_threads)) * device_thread_id)
 
     params_queue_get_time = deque(maxlen=10)
     rollout_time = deque(maxlen=10)
@@ -279,6 +280,10 @@ def rollout(
         return obs, dones, actions, logitss, firststeps, env_ids, rewards
     prepare_data = jax.jit(prepare_data, device=actor_device)
     for update in range(1, args.num_updates + 2):
+        if update == 4 and device_thread_id == 0:
+            jax.profiler.start_trace(f"runs/{run_name}/profile", create_perfetto_trace=True)
+            pass
+
         # print("update", update, "agent_state", agent_state_store[0].step)
         # NOTE: This is a major difference from the sync version:
         # at the end of the rollout phase, the sync version will have the next observation
@@ -421,6 +426,11 @@ def rollout(
         truncations = truncations[-args.async_update:]
         terminations = terminations[-args.async_update:]
         firststeps = firststeps[-args.async_update:]
+        print("update", update)
+        if update == 15:
+            if device_thread_id == 0:
+                jax.profiler.stop_trace()
+            return
 
 
 @partial(jax.jit, static_argnames=("action_dim"))
@@ -720,52 +730,134 @@ if __name__ == "__main__":
         # print("actor_params", agent_state.params.actor_params['params']["Dense_0"]["kernel"])
         # print("critic_params", agent_state.params.critic_params['params']["Dense_0"]["kernel"])
 
-    if args.save_model and args.local_rank == 0:
-        if args.distributed:
-            jax.distributed.shutdown()
-        agent_state = flax.jax_utils.unreplicate(agent_state)
-        model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
-        with open(model_path, "wb") as f:
-            f.write(
-                flax.serialization.to_bytes(
-                    [
-                        vars(args),
-                        [
-                            agent_state.params.network_params,
-                            agent_state.params.actor_params,
-                            agent_state.params.critic_params,
-                        ],
-                    ]
-                )
-            )
-        print(f"model saved to {model_path}")
-        from cleanrl_utils.evals.ppo_envpool_jax_eval import evaluate
+        if update == 15:
+            break
 
-        episodic_returns = evaluate(
-            model_path,
-            make_env,
-            args.env_id,
-            eval_episodes=10,
-            run_name=f"{run_name}-eval",
-            Model=(Network, Actor, Critic),
-        )
-        for idx, episodic_return in enumerate(episodic_returns):
-            writer.add_scalar("eval/episodic_return", episodic_return, idx)
-
-        if args.upload_model:
-            from cleanrl_utils.huggingface import push_to_hub
-
-            repo_name = f"{args.env_id}-{args.exp_name}-seed{args.seed}"
-            repo_id = f"{args.hf_entity}/{repo_name}" if args.hf_entity else repo_name
-            push_to_hub(
-                args,
-                episodic_returns,
-                repo_id,
-                "PPO",
-                f"runs/{run_name}",
-                f"videos/{run_name}-eval",
-                extra_dependencies=["jax", "envpool", "atari"],
-            )
 
     envs.close()
     writer.close()
+
+    # recursively search for the path of `perfetto_trace.json.gz` in `f"runs/{run_name}/profile"` and upload it to wandb
+    HTML_TEMPLATE = r"""
+<div>
+run the following to enable reverse proxy:
+</div>
+<div>
+mitmproxy -p 27658 --mode reverse:https://api.wandb.ai --modify-headers '/~s/Access-Control-Allow-Origin/*'
+</div>
+<form action="https://codepen.io/pen/define" method="POST" target="_blank">
+  <input type="hidden" name="data" value='{"title": "New Pen!", "html": "
+  <!doctype html>
+  <html lang=\"en-us\">
+  <link rel=\"shortcut icon\" href=\"data:image/x-icon;,\" type=\"image/x-icon\">
+  <body>
+
+  <style>
+    pre {
+      border: 1px solid #eee;
+      margin: 10px 0;
+      font-family: monospace;
+      font-size: 10px;
+      min-height: 100px;
+    }
+    
+    body > * { margin: 20px; }
+    
+    #btn_fetch {  font-size: 14px; }
+  </style>
+
+  <div>
+    <select id=\"source\" size=2>
+    <option selected>{perfetto_trace_json_gz_path}</option>
+    </select>
+
+    <br>
+    <button type=\"button\" id=\"btn_fetch\">Fetch and open trace</button>
+    <br>
+    <pre id=\"logs\" cols=\"80\" rows=\"20\"></pre>
+  </div>
+</body>
+<script type=\"text/javascript\">
+  const ORIGIN = \"https://ui.perfetto.dev\";
+  
+  const logs = document.getElementById(\"logs\");
+  const btnFetch = document.getElementById(\"btn_fetch\");
+  
+  async function fetchAndOpen(traceUrl) {
+    logs.innerText += `Fetching trace from ${traceUrl}...\\n`;
+    const resp = await fetch(traceUrl);
+    // Error checcking is left as an exercise to the reader.
+    const blob = await resp.blob();
+    const arrayBuffer = await blob.arrayBuffer();
+    logs.innerText += `fetch() complete, now passing to ui.perfetto.dev\\n`;
+    openTrace(arrayBuffer, traceUrl);
+  }
+  function openTrace(arrayBuffer, traceUrl) {
+    const win = window.open(ORIGIN);
+    if (!win) {
+      btnFetch.style.background = \"#f3ca63\";
+      btnFetch.onclick = () => openTrace(arrayBuffer);
+      logs.innerText += `Popups blocked, you need to manually click the button`;
+      btnFetch.innerText = \"Popups blocked, click here to open the trace file\";
+      return;
+    }
+    const timer = setInterval(() => win.postMessage(\"PING\", ORIGIN), 50);
+    const onMessageHandler = (evt) => {
+      if (evt.data !== \"PONG\") return;
+  
+      // We got a PONG, the UI is ready.
+      window.clearInterval(timer);
+      window.removeEventListener(\"message\", onMessageHandler);
+  
+      const reopenUrl = new URL(location.href);
+      reopenUrl.hash = `#reopen=${traceUrl}`;
+      win.postMessage({
+        perfetto: {
+          buffer: arrayBuffer,
+          title: \"The Trace Title\",
+          url: reopenUrl.toString(),
+      }}, ORIGIN);
+    };
+
+    window.addEventListener(\"message\", onMessageHandler);
+  }
+
+  if (location.hash.startsWith(\"#reopen=\")) {
+   const traceUrl = location.hash.substr(8);
+   fetchAndOpen(traceUrl);
+  }
+  btnFetch.onclick = () => fetchAndOpen(document.getElementById(\"source\").value);
+  </script>
+</body>
+</html>
+"}'>
+
+  <input type="submit" value="Create New Pen with Prefilled Data">
+</form>
+    """
+
+    HTML_TEMPLATE2 = r"""
+<!doctype html>
+<html lang="en-us">
+<link rel="shortcut icon" href="data:image/x-icon;," type="image/x-icon">
+<body>
+
+Please open a new tab and open
+
+{content}
+    """
+    time.sleep(20)
+    def find_perfetto_trace_json_gz(path):
+        for root, dirs, files in os.walk(path):
+            for file in files:
+                if file == "perfetto_trace.json.gz":
+                    return os.path.join(root, file)
+        return None
+    perfetto_trace_json_gz_path = find_perfetto_trace_json_gz(f"runs/{run_name}/profile")
+    if perfetto_trace_json_gz_path is not None and args.track:
+        wandb.save(perfetto_trace_json_gz_path, base_path=perfetto_trace_json_gz_path[:-len("perfetto_trace.json.gz")])
+        with open(f"runs/{run_name}/perfetto.html", "w") as f:
+            f.write(HTML_TEMPLATE.replace(r"{perfetto_trace_json_gz_path}", f"https://localhost:27658/files/{wandb.run.path}/perfetto_trace.json.gz"))
+        wandb.save(f"runs/{run_name}/perfetto.html", base_path=f"runs/{run_name}/")
+        wandb.log({"perfetto_trace": wandb.Html(HTML_TEMPLATE2.replace(r"{content}", f"https://api.wandb.ai/files/{wandb.run.path}/perfetto.html"))})
+

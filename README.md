@@ -55,7 +55,7 @@ Prerequisites:
 ### Installation:
 ```
 poetry install
-poetry run pip install --upgrade "jax[cuda]==0.3.25" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+poetry run pip install --upgrade "jax[cuda11_cudnn82]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 poetry run python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py
 poetry run python cleanba/cleanba_ppo_envpool_impala_atari_wrapper.py --help
 ```
