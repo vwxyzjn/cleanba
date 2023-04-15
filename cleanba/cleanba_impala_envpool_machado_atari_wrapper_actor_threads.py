@@ -347,8 +347,9 @@ def rollout(
         avg_episodic_return = np.mean(returned_episode_returns)
         writer.add_scalar("charts/avg_episodic_return", avg_episodic_return, global_step)
         writer.add_scalar("charts/avg_episodic_length", np.mean(returned_episode_lengths), global_step)
-        print(f"global_step={global_step}, avg_episodic_return={avg_episodic_return}")
-        print("SPS:", int(global_step / (time.time() - start_time)))
+        if device_thread_id == 0:
+            print(f"global_step={global_step}, avg_episodic_return={avg_episodic_return}")
+            print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
         writer.add_scalar("stats/truncations", np.sum(truncations), global_step)
@@ -710,11 +711,13 @@ if __name__ == "__main__":
         )
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        writer.add_scalar("charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"][0].item(), global_step)
-        writer.add_scalar("losses/value_loss", v_loss[-1, -1].item(), global_step)
-        writer.add_scalar("losses/policy_loss", pg_loss[-1, -1].item(), global_step)
-        writer.add_scalar("losses/entropy", entropy_loss[-1, -1].item(), global_step)
-        writer.add_scalar("losses/loss", loss[-1, -1].item(), global_step)
+        if learner_policy_version % 50 == 0:
+            writer.add_scalar("charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"][0].item(), global_step)
+            writer.add_scalar("losses/value_loss", v_loss[-1, -1].item(), global_step)
+            writer.add_scalar("losses/policy_loss", pg_loss[-1, -1].item(), global_step)
+            writer.add_scalar("losses/entropy", entropy_loss[-1, -1].item(), global_step)
+            writer.add_scalar("losses/loss", loss[-1, -1].item(), global_step)
+        writer.add_scalar("charts/update", update, global_step)
         if update >= args.num_updates:
             break
 
