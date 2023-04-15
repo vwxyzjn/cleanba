@@ -279,7 +279,6 @@ def rollout(
         return obs, dones, actions, logitss, firststeps, env_ids, rewards
     prepare_data = jax.jit(prepare_data, device=actor_device)
     for update in range(1, args.num_updates + 2):
-        # print("update", update, "agent_state", agent_state_store[0].step)
         # NOTE: This is a major difference from the sync version:
         # at the end of the rollout phase, the sync version will have the next observation
         # ready for the value bootstrap, but the async version will not have it.
@@ -631,7 +630,6 @@ if __name__ == "__main__":
     dummy_writer.add_scalar = lambda x,y,z: None
 
     for d_idx, d_id in enumerate(args.actor_device_ids):
-        device_params = jax.device_put(flax.jax_utils.unreplicate(agent_state.params), local_devices[d_id])
         for thread_id in range(args.num_actor_threads):
             threading.Thread(
                 target=rollout,
@@ -673,7 +671,8 @@ if __name__ == "__main__":
         writer.add_scalar("stats/rollout_params_queue_get_time_diff", np.mean(rollout_queue_get_time) - avg_params_queue_get_time, global_step)
         data_transfer_time_start = time.time()
 
-        writer.add_scalar(f"stats/actor_policy_version_lag/{device_thread_id}", learner_policy_version * args.num_minibatches - actor_policy_version[0].item())
+        if learner_policy_version % 50 == 0:
+            writer.add_scalar(f"stats/actor_policy_version_lag/{device_thread_id}", learner_policy_version * args.num_minibatches - actor_policy_version[0].item())
         data_transfer_time.append(time.time() - data_transfer_time_start)
         writer.add_scalar("stats/data_transfer_time", np.mean(data_transfer_time), global_step)
 
@@ -690,27 +689,25 @@ if __name__ == "__main__":
             key,
         )
         agent_state_store.append(agent_state)
-        # for d_idx, d_id in enumerate(args.actor_device_ids):
-        #     device_params = jax.device_put(flax.jax_utils.unreplicate(agent_state.params), local_devices[d_id])
-        #     for thread_id in range(args.num_actor_threads):
-        #         params_queues[d_idx * args.num_actor_threads + thread_id].put(device_params)
 
         writer.add_scalar("stats/training_time", time.time() - training_time_start, global_step)
         writer.add_scalar("stats/rollout_queue_size", rollout_queue.qsize(), global_step)
         # writer.add_scalar("stats/params_queue_size", params_queue.qsize(), global_step)
         print(
             global_step,
-            f"actor_policy_version={actor_policy_version}, actor_update={update}, learner_policy_version={learner_policy_version * args.num_minibatches}, training time: {time.time() - training_time_start}s",
+            f"actor_update={update}, learner_policy_version={learner_policy_version * args.num_minibatches}, training time: {time.time() - training_time_start}s",
         )
         writer.add_scalar("stats/learner_policy_version", learner_policy_version * args.num_minibatches, global_step)
 
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        writer.add_scalar("charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"][0].item(), global_step)
-        writer.add_scalar("losses/value_loss", v_loss[-1, -1].item(), global_step)
-        writer.add_scalar("losses/policy_loss", pg_loss[-1, -1].item(), global_step)
-        writer.add_scalar("losses/entropy", entropy_loss[-1, -1].item(), global_step)
-        writer.add_scalar("losses/loss", loss[-1, -1].item(), global_step)
+        if learner_policy_version % 50 == 0:
+            writer.add_scalar("charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"][0].item(), global_step)
+            writer.add_scalar("losses/value_loss", v_loss[-1, -1].item(), global_step)
+            writer.add_scalar("losses/policy_loss", pg_loss[-1, -1].item(), global_step)
+            writer.add_scalar("losses/entropy", entropy_loss[-1, -1].item(), global_step)
+            writer.add_scalar("losses/loss", loss[-1, -1].item(), global_step)
+        writer.add_scalar("charts/update", update, global_step)
         if update >= args.num_updates:
             break
 
