@@ -64,7 +64,7 @@ def parse_args():
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
-    parser.add_argument("--local-num-envs", type=int, default=32,
+    parser.add_argument("--local-num-envs", type=int, default=16,
         help="the number of parallel game environments")
     parser.add_argument("--num-steps", type=int, default=20,
         help="the number of steps to run in each environment per policy rollout")
@@ -72,7 +72,7 @@ def parse_args():
         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument("--gamma", type=float, default=0.99,
         help="the discount factor gamma")
-    parser.add_argument("--num-minibatches", type=int, default=1,
+    parser.add_argument("--num-minibatches", type=int, default=2,
         help="the number of mini-batches")
     parser.add_argument("--ent-coef", type=float, default=0.01,
         help="coefficient of the entropy")
@@ -85,7 +85,7 @@ def parse_args():
 
     parser.add_argument("--actor-device-ids", type=int, nargs="+", default=[0], # type is actually List[int]
         help="the device ids that actor workers will use")
-    parser.add_argument("--num-actor-threads", type=int, default=2,
+    parser.add_argument("--num-actor-threads", type=int, default=4,
         help="the number of actor threads to use (currently only support 1 thread)")
     parser.add_argument("--learner-device-ids", type=int, nargs="+", default=[0], # type is actually List[int]
         help="the device ids that learner workers will use")
