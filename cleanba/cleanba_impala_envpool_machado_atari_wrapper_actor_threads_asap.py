@@ -94,7 +94,6 @@ def parse_args():
     args = parser.parse_args()
     args.async_batch_size = args.local_num_envs # local_num_envs must be equal to async_batch_size due to limitation of `rlax`
     args.local_batch_size = int(args.local_num_envs * args.num_steps)
-    # args.local_batch_size = int(args.local_num_envs * args.num_steps * args.num_actor_threads * len(args.actor_device_ids))
     args.local_minibatch_size = int(args.local_batch_size // args.num_minibatches)
     args.async_update = int(args.local_num_envs / args.async_batch_size)
     # fmt: on
@@ -220,7 +219,9 @@ def get_action(
 
 
 def rollout(
+    training_finished_fn,
     agent_state_store,
+    global_step_store,
     key: jax.random.PRNGKey,
     args,
     rollout_queue,
@@ -236,7 +237,6 @@ def rollout(
         args.async_batch_size,
     )()
     len_actor_device_ids = len(args.actor_device_ids)
-    global_step = 0
     # TRY NOT TO MODIFY: start the game
     start_time = time.time()
 
@@ -278,13 +278,10 @@ def rollout(
         rewards = jnp.array_split(jnp.asarray(rewards), len(learner_devices), axis=1)
         return obs, dones, actions, logitss, firststeps, env_ids, rewards
     prepare_data = jax.jit(prepare_data, device=actor_device)
-    for update in range(1, args.num_updates + 2):
-        # NOTE: This is a major difference from the sync version:
-        # at the end of the rollout phase, the sync version will have the next observation
-        # ready for the value bootstrap, but the async version will not have it.
-        # for this reason we do `num_steps + 1`` to get the extra states for value bootstrapping.
-        # but note that the extra states are not used for the loss computation in the next iteration,
-        # while the sync version will use the extra state for the loss computation.
+    update = 0
+    while not training_finished_fn():
+        global_step = global_step_store[0]
+        update += 1
         update_time_start = time.time()
         env_recv_time = 0
         inference_time = 0
@@ -309,15 +306,9 @@ def rollout(
             args.async_update, (num_steps_with_bootstrap) * args.async_update
         ):  # num_steps + 1 to get the states for value bootstrapping.
 
-            # if step % 4 == 0:
-            #     local_agent_state = agent_state_store[0]
-            #     params = jax.device_put(flax.jax_utils.unreplicate(local_agent_state.params), actor_device)
-            #     actor_policy_version = local_agent_state.step
-
             env_recv_time_start = time.time()
             next_obs, next_reward, next_done, info = envs.recv()
             env_recv_time += time.time() - env_recv_time_start
-            global_step += len(next_done) * args.num_actor_threads * len_actor_device_ids * args.world_size
             env_id = info["env_id"]
 
             inference_time_start = time.time()
@@ -380,7 +371,6 @@ def rollout(
             rewards,
         )
         payload = (
-            global_step,
             actor_policy_version,
             update,
             jax.device_put_sharded(p_obs, devices=learner_devices),
@@ -537,8 +527,7 @@ if __name__ == "__main__":
     args.num_envs = args.local_num_envs * args.world_size * args.num_actor_threads * len(args.actor_device_ids)
     args.batch_size = args.local_batch_size * args.world_size
     args.minibatch_size = args.local_minibatch_size * args.world_size
-    args.num_gradient_updates = args.total_timesteps // args.local_batch_size
-    args.num_updates = args.total_timesteps // int(args.local_batch_size * args.num_actor_threads * len(args.actor_device_ids) * args.world_size)
+    args.num_gradient_updates = args.total_timesteps // (args.num_envs * args.num_steps)
     args.async_update = int(args.local_num_envs / args.async_batch_size)
     local_devices = jax.local_devices()
     global_devices = jax.devices()
@@ -628,13 +617,20 @@ if __name__ == "__main__":
     fair_num_cpus = num_cpus // len(args.actor_device_ids)
     dummy_writer = SimpleNamespace()
     dummy_writer.add_scalar = lambda x,y,z: None
+    training_finished = False
+    training_finished_fn = lambda: training_finished
+    global_step = 0
+    global_step_store = collections.deque(maxlen=1)
+    global_step_store.append(global_step)
 
     for d_idx, d_id in enumerate(args.actor_device_ids):
         for thread_id in range(args.num_actor_threads):
             threading.Thread(
                 target=rollout,
                 args=(
+                    training_finished_fn,
                     agent_state_store,
+                    global_step_store,
                     jax.device_put(key, local_devices[d_id]),
                     args,
                     rollout_queue,
@@ -653,7 +649,6 @@ if __name__ == "__main__":
         learner_policy_version += 1
         rollout_queue_get_time_start = time.time()
         (
-            global_step,
             actor_policy_version,
             update,
             t_obs,
@@ -666,6 +661,8 @@ if __name__ == "__main__":
             avg_params_queue_get_time,
             device_thread_id,
         ) = rollout_queue.get()
+        global_step += args.num_envs * args.num_steps * args.world_size
+        global_step_store.append(global_step)
         rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
         writer.add_scalar("stats/rollout_queue_get_time", np.mean(rollout_queue_get_time), global_step)
         writer.add_scalar("stats/rollout_params_queue_get_time_diff", np.mean(rollout_queue_get_time) - avg_params_queue_get_time, global_step)
@@ -708,14 +705,11 @@ if __name__ == "__main__":
             writer.add_scalar("losses/entropy", entropy_loss[-1, -1].item(), global_step)
             writer.add_scalar("losses/loss", loss[-1, -1].item(), global_step)
         writer.add_scalar("charts/update", update, global_step)
-        if update >= args.num_updates:
+        if global_step > args.total_timesteps:
+            training_finished = True
+            while rollout_queue.qsize():
+                rollout_queue.get()
             break
-
-        # print weights
-        # sum_params(agent_state.params)
-        # print("network_params", agent_state.params.network_params['params']["Dense_0"]["kernel"])
-        # print("actor_params", agent_state.params.actor_params['params']["Dense_0"]["kernel"])
-        # print("critic_params", agent_state.params.critic_params['params']["Dense_0"]["kernel"])
 
     if args.save_model and args.local_rank == 0:
         if args.distributed:
