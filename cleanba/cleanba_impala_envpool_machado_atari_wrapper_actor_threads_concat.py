@@ -281,6 +281,7 @@ def rollout(
         env_recv_time = 0
         inference_time = 0
         storage_time = 0
+        d2h_time = 0
         env_send_time = 0
 
         num_steps_with_bootstrap = args.num_steps + 1 + int(len(obs) == 0)
@@ -290,6 +291,11 @@ def rollout(
         params_queue_get_time_start = time.time()
         if update != 2:
             params = params_queue.get()
+            # NOTE: block here is important because otherwise this thread will call
+            # the jitted `get_action` function that hangs until the params are ready.
+            # This blocks the `get_action` function in other actor threads.
+            # See https://imgur.com/a/5UeRaUH for a visual explanation.
+            params.network_params['params']["Dense_0"]["kernel"].block_until_ready()
             actor_policy_version += 1
         params_queue_get_time.append(time.time() - params_queue_get_time_start)
         writer.add_scalar("stats/params_queue_get_time", np.mean(params_queue_get_time), global_step)
@@ -307,8 +313,11 @@ def rollout(
             next_obs, action, logits, key = get_action(params, next_obs, key, envs.single_action_space.n)
             inference_time += time.time() - inference_time_start
 
+            d2h_time_start = time.time()
+            cpu_action = np.array(action)
+            d2h_time += time.time() - d2h_time_start
             env_send_time_start = time.time()
-            envs.send(np.array(action), env_id)
+            envs.send(cpu_action, env_id)
             env_send_time += time.time() - env_send_time_start
             storage_time_start = time.time()
             obs.append(next_obs)
@@ -351,6 +360,7 @@ def rollout(
         writer.add_scalar("stats/env_recv_time", env_recv_time, global_step)
         writer.add_scalar("stats/inference_time", inference_time, global_step)
         writer.add_scalar("stats/storage_time", storage_time, global_step)
+        writer.add_scalar("stats/d2h_time", d2h_time, global_step)
         writer.add_scalar("stats/env_send_time", env_send_time, global_step)
         p_obs, p_dones, p_actions, p_logitss, p_firststeps, p_env_ids, p_rewards = prepare_data(
             obs,
@@ -673,11 +683,6 @@ if __name__ == "__main__":
         rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
         writer.add_scalar("stats/rollout_queue_get_time", np.mean(rollout_queue_get_time), global_step)
         writer.add_scalar("stats/rollout_params_queue_get_time_diff", np.mean(rollout_queue_get_time) - avg_params_queue_get_time, global_step)
-
-        data_transfer_time_start = time.time()
-
-        data_transfer_time.append(time.time() - data_transfer_time_start)
-        writer.add_scalar("stats/data_transfer_time", np.mean(data_transfer_time), global_step)
 
         training_time_start = time.time()
         (agent_state, loss, pg_loss, v_loss, entropy_loss, key) = multi_device_update(
