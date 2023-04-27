@@ -12,7 +12,6 @@ from typing import List, NamedTuple, Optional, Sequence, Tuple
 import envpool
 import flax
 import flax.linen as nn
-import gym
 import jax
 import jax.numpy as jnp
 import numpy as np
