@@ -809,10 +809,12 @@ if __name__ == "__main__":
             global_step,
             f"actor_policy_version={actor_policy_version}, actor_update={update}, learner_policy_version={learner_policy_version}, training time: {time.time() - training_time_start}s",
         )
-
+        if args.num_grad_accum_steps > 1:
+            cur_lr = agent_state.opt_state[2][1].hyperparams["learning_rate"][-1].item()
+        else:
+            cur_lr = agent_state.opt_state[1].hyperparams["learning_rate"][0].item()
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        # Not sure how to log the learning rate when using the MultiSteps wrapper for grad accum
-        # writer.add_scalar("charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"][0].item(), global_step)
+        writer.add_scalar("charts/learning_rate", cur_lr, global_step)
         writer.add_scalar("losses/value_loss", v_loss[-1, -1, -1].item(), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss[-1, -1, -1].item(), global_step)
         writer.add_scalar("losses/entropy", entropy_loss[-1, -1, -1].item(), global_step)
