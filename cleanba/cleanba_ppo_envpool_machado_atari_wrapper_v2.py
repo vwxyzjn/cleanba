@@ -48,7 +48,7 @@ class Args:
     "whether to upload the saved model to huggingface"
     hf_entity: str = ""
     "the user or org name of the model repository from the Hugging Face Hub"
-    log_frequency: int = 30
+    log_frequency: int = 10
     "the logging frequency of the model performance (in terms of `updates`)"
 
     # Algorithm specific arguments
