@@ -84,7 +84,7 @@ class Args:
     "the maximum norm for the gradient clipping"
     target_kl: float = None
     "the target KL divergence threshold"
-    channels: List[int] = field(default_factory=lambda: [16, 64, 64, 64])
+    channels: List[int] = field(default_factory=lambda: [16, 32, 32])
     "the channels of the CNN"
     hiddens: List[int] = field(default_factory=lambda: [256])
     "the hiddens size of the MLP"
