@@ -492,6 +492,15 @@ if __name__ == "__main__":
     agent_state = flax.jax_utils.replicate(agent_state, devices=learner_devices)
 
     @jax.jit
+    def get_value(
+        params: flax.core.FrozenDict,
+        obs: np.ndarray,
+    ):
+        hidden = Network(args.channels, args.hiddens).apply(params.network_params, obs)
+        value = Critic().apply(params.critic_params, hidden).squeeze()
+        return value
+
+    @jax.jit
     def get_logprob_entropy_value(
         params: flax.core.FrozenDict,
         obs: np.ndarray,
@@ -507,29 +516,15 @@ if __name__ == "__main__":
         value = Critic().apply(params.critic_params, hidden).squeeze()
         return logprob, entropy, value
 
-    def ppo_loss(params, obs, actions, behavior_logprobs, rewards, dones, firststeps):
-        discounts = (1.0 - dones) * args.gamma
-        mask = 1.0 - firststeps
+    def ppo_loss(params, obs, actions, behavior_logprobs, firststeps, advantages, target_values):
+        # TODO: figure out when to use `mask`
+        # mask = 1.0 - firststeps
         newlogprob, entropy, newvalue = jax.vmap(get_logprob_entropy_value, in_axes=(None, 0, 0))(params, obs, actions)
-
         behavior_logprobs = behavior_logprobs[:-1]
         newlogprob = newlogprob[:-1]
         entropy = entropy[:-1]
         actions = actions[:-1]
-        mask = mask[:-1]
-        rewards = rewards[:-1]
-        discounts = discounts[:-1]
-
-        def gae_advantages(rewards: jnp.array, discounts: jnp.array, values: jnp.array) -> Tuple[jnp.ndarray, jnp.array]:
-            advantages = rlax.truncated_generalized_advantage_estimation(rewards, discounts, args.gae_lambda, values)
-            advantages = jax.lax.stop_gradient(advantages)
-            target_values = values[:-1] + advantages
-            target_values = jax.lax.stop_gradient(target_values)
-            return advantages, target_values
-
-        gae_advantages = jax.vmap(gae_advantages, in_axes=1, out_axes=1)
-        advantages, target_values = gae_advantages(rewards, discounts, newvalue)
-
+        # mask = mask[:-1]
         if args.norm_adv:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
@@ -559,21 +554,31 @@ if __name__ == "__main__":
         behavior_logprobs = jax.vmap(lambda logits, action: jax.nn.log_softmax(logits)[jnp.arange(action.shape[0]), action])(
             storage.logitss, storage.actions
         )
+        values = jax.vmap(get_value, in_axes=(None, 0))(agent_state.params, storage.obs)
+        discounts = (1.0 - storage.dones) * args.gamma
 
+        def gae_advantages(rewards: jnp.array, discounts: jnp.array, values: jnp.array) -> Tuple[jnp.ndarray, jnp.array]:
+            advantages = rlax.truncated_generalized_advantage_estimation(rewards, discounts, args.gae_lambda, values)
+            advantages = jax.lax.stop_gradient(advantages)
+            target_values = values[:-1] + advantages
+            target_values = jax.lax.stop_gradient(target_values)
+            return advantages, target_values
+
+        advantages, target_values = jax.vmap(gae_advantages, in_axes=1, out_axes=1)(storage.rewards[:-1], discounts[:-1], values)
         def update_epoch(carry, _):
             agent_state, key = carry
             key, subkey = jax.random.split(key)
 
             def update_minibatch(agent_state, minibatch):
-                mb_obs, mb_actions, mb_behavior_logprobs, mb_rewards, mb_dones, mb_firststeps = minibatch
+                mb_obs, mb_actions, mb_behavior_logprobs, mb_firststeps, mb_advantages, mb_target_values = minibatch
                 (loss, (pg_loss, v_loss, entropy_loss, approx_kl)), grads = ppo_loss_grad_fn(
                     agent_state.params,
                     mb_obs,
                     mb_actions,
                     mb_behavior_logprobs,
-                    mb_rewards,
-                    mb_dones,
                     mb_firststeps,
+                    mb_advantages,
+                    mb_target_values,
                 )
                 grads = jax.lax.pmean(grads, axis_name="local_devices")
                 agent_state = agent_state.apply_gradients(grads=grads)
@@ -586,9 +591,9 @@ if __name__ == "__main__":
                     jnp.array(jnp.split(storage.obs, args.num_minibatches, axis=1)),
                     jnp.array(jnp.split(storage.actions, args.num_minibatches, axis=1)),
                     jnp.array(jnp.split(behavior_logprobs, args.num_minibatches, axis=1)),
-                    jnp.array(jnp.split(storage.rewards, args.num_minibatches, axis=1)),
-                    jnp.array(jnp.split(storage.dones, args.num_minibatches, axis=1)),
                     jnp.array(jnp.split(storage.firststeps, args.num_minibatches, axis=1)),
+                    jnp.array(jnp.split(advantages, args.num_minibatches, axis=1)),
+                    jnp.array(jnp.split(target_values, args.num_minibatches, axis=1)),
                 ),
             )
             return (agent_state, key), (loss, pg_loss, v_loss, entropy_loss, approx_kl)
