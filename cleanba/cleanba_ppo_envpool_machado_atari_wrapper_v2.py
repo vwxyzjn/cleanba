@@ -97,6 +97,8 @@ class Args:
     "the device ids that learner workers will use"
     distributed: bool = False
     "whether to use `jax.distirbuted`"
+    concurrency: bool = True
+    "whether to run the actor and learner concurrently"
 
     # runtime arguments to be filled in
     async_batch_size: int = 0
@@ -285,15 +287,19 @@ def rollout(
         # concurrently with the learning process. It also ensures the actor's policy version is only 1 step
         # behind the learner's policy version
         params_queue_get_time_start = time.time()
-        if update != 2:
+        if args.concurrency:
+            if update != 2:
+                params = params_queue.get()
+                # NOTE: block here is important because otherwise this thread will call
+                # the jitted `get_action` function that hangs until the params are ready.
+                # This blocks the `get_action` function in other actor threads.
+                # See https://excalidraw.com/#json=hSooeQL707gE5SWY8wOSS,GeaN1eb2r24PPi75a3n14Q for a visual explanation.
+                params.network_params["params"]["Dense_0"][
+                    "kernel"
+                ].block_until_ready()  # TODO: check if params.block_until_ready() is enough
+                actor_policy_version += 1
+        else:
             params = params_queue.get()
-            # NOTE: block here is important because otherwise this thread will call
-            # the jitted `get_action` function that hangs until the params are ready.
-            # This blocks the `get_action` function in other actor threads.
-            # See https://excalidraw.com/#json=hSooeQL707gE5SWY8wOSS,GeaN1eb2r24PPi75a3n14Q for a visual explanation.
-            params.network_params["params"]["Dense_0"][
-                "kernel"
-            ].block_until_ready()  # TODO: check if params.block_until_ready() is enough
             actor_policy_version += 1
         params_queue_get_time.append(time.time() - params_queue_get_time_start)
         rollout_time_start = time.time()
@@ -490,6 +496,9 @@ if __name__ == "__main__":
         ),
     )
     agent_state = flax.jax_utils.replicate(agent_state, devices=learner_devices)
+    print(network.tabulate(network_key, np.array([envs.single_observation_space.sample()])))
+    print(actor.tabulate(actor_key, network.apply(network_params, np.array([envs.single_observation_space.sample()]))))
+    print(critic.tabulate(critic_key, network.apply(network_params, np.array([envs.single_observation_space.sample()]))))
 
     @jax.jit
     def get_value(
