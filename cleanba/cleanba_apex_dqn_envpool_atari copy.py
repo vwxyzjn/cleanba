@@ -97,13 +97,13 @@ class PERReplayBuffer:
             self._setup(rollout)
         indexer = slice(self.pos, self.pos + self.n_envs)
 
-        self.priorities[indexer] = np.asarray(priorities)#.copy()
-        self.obs[indexer] = np.asarray(rollout.obs)#.copy()
-        self.actions[indexer] = np.asarray(rollout.actions)#.copy()
-        self.rewards[indexer] = np.asarray(rollout.rewards)#.copy()
-        self.actions[indexer] = np.asarray(rollout.actions)#.copy()
-        self.dones[indexer] = np.asarray(rollout.dones)#.copy()
-        self.firststeps[indexer] = np.asarray(rollout.firststeps)#.copy()
+        self.priorities[indexer] = np.array(priorities).copy()
+        self.obs[indexer] = np.array(rollout.obs).copy()
+        self.actions[indexer] = np.array(rollout.actions).copy()
+        self.rewards[indexer] = np.array(rollout.rewards).copy()
+        self.actions[indexer] = np.array(rollout.actions).copy()
+        self.dones[indexer] = np.array(rollout.dones).copy()
+        self.firststeps[indexer] = np.array(rollout.firststeps).copy()
 
         self.timesteps_seen += self.n_envs * self.length
         self.pos = self.pos + self.n_envs
@@ -225,7 +225,7 @@ class Args:
     log_interval: int = 100
     "the log interval"
 
-    actor_device_ids = [0,1]#,2,3] #[0,1,2,3]
+    actor_device_ids = [0, 1]#[0,1,2,3]
     "actor devices"
     learner_device_ids = [4,5,6,7]
     "learner devices"
@@ -376,8 +376,6 @@ def calculate_priorities(rollout, q_state):
 
 
 def local_buffer_to_replay_buffer(queue, rb, device, queue_time, make_rollout_time, calculate_priorities_time, rb_add_time):
-    global_num_envs = len(args.actor_device_ids) * args.num_actor_threads * args.n_envs
-    local_storage = []
     while True:
         queue_time_start = time.time()
         buffer, q_state = queue.get()
@@ -390,7 +388,6 @@ def local_buffer_to_replay_buffer(queue, rb, device, queue_time, make_rollout_ti
         priorities = calculate_priorities(d_rollout, q_state) # possible q_state isn't on the correct device?
         cpu_priorities = jax.device_get(priorities)
         calculate_priorities_time.append(time.time() - calculate_priorities_time_start)
-        
         rb_add_time_start = time.time()
         rb.thread_safe_add(cpu_priorities, rollout)
         rb_add_time.append(time.time() - rb_add_time_start)
@@ -535,8 +532,6 @@ def rollout(
                 writer.add_scalar("stats/actor/make_rollout_time", np.mean(make_rollout_time), global_step)
                 writer.add_scalar("stats/actor/calculate_priorities_time", np.mean(calculate_priorities_time), global_step)
                 writer.add_scalar("stats/actor/replay_buffer_add_time", np.mean(replay_buffer_add_time), global_step)
-
-        time.sleep(0.015)
 
 
 if __name__ == "__main__":
@@ -701,6 +696,16 @@ if __name__ == "__main__":
             queue.put((batch, inds, np.mean(sample_batch_time), np.mean(device_put_time)))
 
     threading.Thread(target=prefetch_batches, args=(rb, batch_queue, learner_devices[0])).start()
+    
+    priorities_queue = queue.Queue(maxsize=args.n_prefetch)
+    def update_priorities(rb, queue):
+        while True:
+            updated_priorities = queue.get()
+            update_priorities_time_start = time.time()
+            rb.thread_safe_update_priorities(inds, updated_priorities)
+            update_priorities_time.append(time.time() - update_priorities_time_start)
+
+    threading.Thread(target=update_priorities, args=(rb, priorities_queue)).start()
 
     @jax.jit
     def split_data(data):
@@ -733,14 +738,12 @@ if __name__ == "__main__":
             sharded_batch,
         )
         updated_priorities = updated_priorities.reshape(-1)
-        updated_priorities = np.array(updated_priorities) # you can remove this and make the transfer device op happen in buffer preventing from blocking training 
+        cpu_updated_priorities = np.array(updated_priorities) # you can remove this and make the transfer device op happen in buffer preventing from blocking training 
         update_time.append(time.time() - update_time_start)
         loss = loss.mean(0)
         q_value = q_value.mean(0)
 
-        update_priorities_time_start = time.time()
-        rb.update_priorities(inds, updated_priorities)
-        update_priorities_time.append(time.time() - update_priorities_time_start)
+        priorities_queue.put(cpu_updated_priorities)
 
         # put the updated params to the actors
         put_params_time_start = time.time()
