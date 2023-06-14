@@ -1,35 +1,28 @@
-# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/dqn/#dqn_jaxpy
 import os
 import sys
-import tyro
-import random
 import time
 import queue
+import random
+import warnings
 import threading
 from dataclasses import dataclass
 from typing import NamedTuple
 from collections import deque
-from types import SimpleNamespace
 
-import rlax
-import distrax
-import flax
-import flax.linen as nn
-import jax
-import jax.numpy as jnp
-import numpy as np
-import optax
-from flax.training.train_state import TrainState
 import envpool
+import psutil
+import numpy as np
+
+import jax
+import rlax
+import flax
+import optax
+import distrax
+import jax.numpy as jnp
+import flax.linen as nn
+from flax.training.train_state import TrainState
 from tensorboardX import SummaryWriter
 
-import psutil
-import warnings
-from typing import NamedTuple
-
-import numpy as np
-
-f32 = np.float32
 
 class Batch(NamedTuple):
     obs: np.ndarray
@@ -43,15 +36,7 @@ class Batch(NamedTuple):
 class PERReplayBuffer:
     """
     Replay buffer for storing rollouts of trajectories.
-    
-    :param capacity: maximum number of rollouts to store
-    :param length: length of each rollout
-    :param valid_length: number of timesteps in each rollout that can be sampled
-    :param n_envs: number of parallel environments
-    :param seed: random seed
-    :param alpha: exponent for prioritized sampling (0 = uniform sampling)
-    :param beta: exponent for importance sampling (0 = no correction)
-    
+
     """
     def __init__(
         self, capacity: int, length: int, valid_length: int,
@@ -74,7 +59,6 @@ class PERReplayBuffer:
         self.timesteps_seen = 0
 
         assert self.capacity % self.n_envs == 0, "Capacity must be evenly divisible by n_envs"
-        # TODO: remove via reversing the indexing method (i.e. [self.pos-length:self.pos])
 
     def _setup(self, example: NamedTuple):
         assert len(example.rewards.shape) == 2, "Rewards must be scalars (i.e. shape (n_envs, length,)))"
@@ -82,7 +66,7 @@ class PERReplayBuffer:
         dtype = {k: v.dtype for k, v in example._asdict().items()}
         self._check_memory(example)
 
-        self.priorities = np.zeros((self.capacity, self.valid_length), dtype=f32)
+        self.priorities = np.zeros((self.capacity, self.valid_length), dtype=np.float32)
         self.obs = np.zeros((self.capacity, self.length, *shapes['obs']), dtype=dtype['obs'])
         self.actions = np.zeros((self.capacity, self.length, *shapes['actions']), dtype=dtype['actions'])
         self.rewards = np.zeros((self.capacity, self.length, *shapes['rewards']), dtype=dtype['rewards'])
@@ -97,13 +81,13 @@ class PERReplayBuffer:
             self._setup(rollout)
         indexer = slice(self.pos, self.pos + self.n_envs)
 
-        self.priorities[indexer] = np.asarray(priorities)#.copy()
-        self.obs[indexer] = np.asarray(rollout.obs)#.copy()
-        self.actions[indexer] = np.asarray(rollout.actions)#.copy()
-        self.rewards[indexer] = np.asarray(rollout.rewards)#.copy()
-        self.actions[indexer] = np.asarray(rollout.actions)#.copy()
-        self.dones[indexer] = np.asarray(rollout.dones)#.copy()
-        self.firststeps[indexer] = np.asarray(rollout.firststeps)#.copy()
+        self.priorities[indexer] = np.array(priorities).copy()
+        self.obs[indexer] = np.array(rollout.obs).copy()
+        self.actions[indexer] = np.array(rollout.actions).copy()
+        self.rewards[indexer] = np.array(rollout.rewards).copy()
+        self.actions[indexer] = np.array(rollout.actions).copy()
+        self.dones[indexer] = np.array(rollout.dones).copy()
+        self.firststeps[indexer] = np.array(rollout.firststeps).copy()
 
         self.timesteps_seen += self.n_envs * self.length
         self.pos = self.pos + self.n_envs
@@ -178,7 +162,7 @@ class Args:
     "the seed of the experiment"
     track: bool = True
     "if toggled, this experiment will be tracked with Weights and Biases"
-    wandb_project_name: str = "Distributed PER"
+    wandb_project_name: str = "ApeX DQN"
     "the wandb's project name"
     wandb_entity: str = None
     "the entity (team) of wandb's project"
@@ -196,9 +180,9 @@ class Args:
     "total number of atari timesteps of the experiments"
     learning_rate: float = 1e-4
     "the learning rate of the optimizer"
-    n_envs: int = 100
+    n_envs: int = 200
     "the number of parallel game environments"
-    buffer_size: int = 10000
+    buffer_size: int = 10_000 # TODO
     "the replay memory buffer size"
     rollout_length: int = 100
     "the number of transitions to collect before sending to the replay memory"
@@ -218,16 +202,16 @@ class Args:
     "the epsilon value for epsilon greedy exploration"
     epsilon_greedy_alpha: float = 7.0
     "the alpha value for epsilon greedy exploration"
-    learning_starts: int = 50_000 # TODO 
+    learning_starts: int = 50_000 
     "the timestep it takes to start learning"
     n_prefetch: int = 16
     "the number of batches to prefetch for learner"
     log_interval: int = 100
     "the log interval"
 
-    actor_device_ids = [0,1]#,2,3] #[0,1,2,3]
+    actor_device_ids = [0]
     "actor devices"
-    learner_device_ids = [4,5,6,7]
+    learner_device_ids = [2, 3]
     "learner devices"
     num_actor_threads: int = 2
 
@@ -264,7 +248,7 @@ def scale_gradient(x: jnp.ndarray, scale: float) -> jnp.ndarray:
 
 class QNetwork(nn.Module):
     action_dim: int
-    scale_factor = 1 / jnp.sqrt(2)
+    scale: float = 1 / jnp.sqrt(2)
 
     @nn.compact
     def __call__(self, x):
@@ -278,7 +262,7 @@ class QNetwork(nn.Module):
         x = nn.relu(x)
         x = x.reshape((x.shape[0], -1))
         
-        # x = scale_gradient(x, self.scale_factor)
+        # x = scale_gradient(x, self.scale)
 
         # value stream
         v = nn.Dense(512)(x)
@@ -306,22 +290,40 @@ class ThreadSafeReplayBuffer(PERReplayBuffer):
         super().__init__(*args, **kwargs)
         self.lock = threading.Lock()
 
+        self.lock_add_time = deque(maxlen=10)
+        self.add_time = deque(maxlen=10)
+        self.lock_sample_time = deque(maxlen=10)
+        self.sample_time = deque(maxlen=10)
+        self.lock_update_priorities_time = deque(maxlen=10)
+        self.update_priorities_time = deque(maxlen=10)
+
     def thread_safe_add(self, *args, **kwargs):
+        lock_add_time_start = time.time()
         with self.lock:
+            add_time_start = time.time()
             self.add(*args, **kwargs)
+            self.add_time.append(time.time() - add_time_start)
+        self.lock_add_time.append(time.time() - lock_add_time_start)
 
     def thread_safe_sample(self, *args, **kwargs):
+        lock_sample_time_start = time.time()
         with self.lock:
-            return self.sample(*args, **kwargs)
+            sample_time_start = time.time()
+            self.sample_time.append(time.time() - sample_time_start)
+        self.lock_sample_time.append(time.time() - lock_sample_time_start)
+        return self.sample(*args, **kwargs)
 
     def thread_safe_update_priorities(self, *args, **kwargs):
+        lock_update_priorities_start = time.time()
         with self.lock:
+            update_priorities_time_start = time.time()
             self.update_priorities(*args, **kwargs)
+            self.update_priorities_time.append(time.time() - update_priorities_time_start)
+        self.lock_update_priorities_time.append(time.time() - lock_update_priorities_start)
 
     def thread_safe_ready(self, min_size):
         with self.lock:
             return self.ready(min_size)
-
 
 class Transition(NamedTuple):
     obs: list
@@ -334,21 +336,24 @@ class Transition(NamedTuple):
 
 @jax.jit
 def calculate_priorities(rollout, q_state):
-    # rollout: [n_envs, rollout_length, ...]
+    # rollout.shape (n_envs, rollout_length, ...)
     n = args.bootstrap_length
     q_tm1 = rollout.q_values[:, :-n]
     a_tm1 = rollout.actions[:, :-1].astype(jnp.int32)
     r_t = rollout.rewards[:, :-1]
     dones_t = rollout.dones[:, :-1]
     obs_tpn = rollout.obs[:, n:]
-    
+
     apply = jax.vmap(q_network.apply, in_axes=(None, 0))
     q_tpn_val = apply(q_state.target_params, obs_tpn)
     q_tpn_select = apply(q_state.params, obs_tpn)
-    
-    def over_n_envs_multi_step_double_q_learning(_q_tm1, _a_tm1, _r_t, _dones_t, _q_tpn_val, _q_tpn_select): 
+
+    @jax.vmap
+    def calculate_priorities_over_envs_dim(_q_tm1, _a_tm1, _r_t, _dones_t, _q_tpn_val, _q_tpn_select): 
         i_range = jnp.arange(args.valid_length)
-        def vectorize_over_rollout_index(i):
+
+        @jax.vmap
+        def calculate_priorities_over_rollout_dim(i):
             q_tm1_i = _q_tm1[i]
             a_tm1_i = _a_tm1[i]
             r_tn_i = jax.lax.dynamic_slice_in_dim(_r_t, i, n)
@@ -363,37 +368,33 @@ def calculate_priorities(rollout, q_state):
                 q_tpn_value=q_tpn_val_i,
                 q_tpn_selector=q_tpn_select_i,
             )
-        # vectorize over valid indicies in the rollout
-        return jax.vmap(vectorize_over_rollout_index)(i_range)
+        return calculate_priorities_over_rollout_dim(i_range)
 
-    # vmap over n_envs
-    vectorized_multi_step_double_q_learning = jax.vmap(over_n_envs_multi_step_double_q_learning)
-    td_error = vectorized_multi_step_double_q_learning(
+    td_error = calculate_priorities_over_envs_dim(
         q_tm1, a_tm1, r_t, dones_t, q_tpn_val, q_tpn_select
     )
 
     return jnp.abs(td_error).reshape(args.n_envs, args.valid_length)
 
-
-def local_buffer_to_replay_buffer(queue, rb, device, queue_time, make_rollout_time, calculate_priorities_time, rb_add_time):
-    global_num_envs = len(args.actor_device_ids) * args.num_actor_threads * args.n_envs
-    local_storage = []
+# STOP HERE # # # # 
+def local_buffer_to_replay_buffer(queue, rb):
+    priority_storage = []
+    rollout_storage = []
     while True:
-        queue_time_start = time.time()
-        buffer, q_state = queue.get()
-        queue_time.append(time.time() - queue_time_start)
-        make_rollout_time_start = time.time()
-        rollout = jax.tree_map(lambda *xs: np.asarray(xs).swapaxes(0,1), *buffer) # asarray may introduce silent bug
+        buffer, q_state, device = queue.get()
+        rollout = jax.tree_map(lambda *xs: np.stack(xs).swapaxes(0, 1), *buffer) # [n_envs, rollout_length, ...]
         d_rollout = jax.tree_map(lambda x: jax.device_put(x, device), rollout)
-        make_rollout_time.append(time.time() - make_rollout_time_start)
-        calculate_priorities_time_start = time.time()
-        priorities = calculate_priorities(d_rollout, q_state) # possible q_state isn't on the correct device?
-        cpu_priorities = jax.device_get(priorities)
-        calculate_priorities_time.append(time.time() - calculate_priorities_time_start)
-        
-        rb_add_time_start = time.time()
-        rb.thread_safe_add(cpu_priorities, rollout)
-        rb_add_time.append(time.time() - rb_add_time_start)
+        priorities = calculate_priorities(d_rollout, q_state)
+        priorities = np.array(priorities)
+        priority_storage.append(priorities)
+        rollout_storage.append(rollout)
+
+        if len(rollout_storage) == args.num_actor_threads * len(args.actor_device_ids):
+            priorities = jax.tree_map(lambda *xs: np.concatenate(xs), *priority_storage)
+            rollouts = jax.tree_map(lambda *xs: np.concatenate(xs), *rollout_storage)
+            rb.thread_safe_add(priorities, rollouts)
+            priority_storage = []
+            rollout_storage = []
 
 @jax.jit
 def get_action(params, obs, epsilon, rng):
@@ -408,37 +409,16 @@ def rollout(
     writer,
     thread_id,
     actor_device,
-    sps_store,
+    local_queue,
+    ratio_store,
 ):
     print(f"Actor {thread_id} has started on device {actor_device}")
     envs = make_env(args.env_id, args.seed, args.n_envs)()
     epsilon_values = epilson_values_fn(args.n_envs)
 
-    env_recv_time = deque(maxlen=10)
-    get_action_h2d_time = deque(maxlen=10)
-    get_action_time = deque(maxlen=10)
-    get_action_d2h_time = deque(maxlen=10)
-    env_send_time = deque(maxlen=10)
-    storage_time = deque(maxlen=10)
-    local_buffer_get_time = deque(maxlen=10)
-    make_rollout_time = deque(maxlen=10)
-    calculate_priorities_time = deque(maxlen=10)
-    replay_buffer_add_time = deque(maxlen=10)
-
     key = jax.random.PRNGKey(args.seed)
-    local_queue = queue.Queue(maxsize=args.num_actor_threads * len(args.actor_device_ids))
-    threading.Thread(
-        target=local_buffer_to_replay_buffer,
-        args=(
-            local_queue,
-            rb,
-            actor_device,
-            local_buffer_get_time,
-            make_rollout_time,
-            calculate_priorities_time,
-            replay_buffer_add_time)
-        ).start()
 
+    # TRY NOT TO MODIFY: start the game
     episode_returns = np.zeros((args.n_envs,), dtype=np.float32)
     returned_episode_returns = np.zeros((args.n_envs,), dtype=np.float32)
     episode_lengths = np.zeros((args.n_envs,), dtype=np.float32)
@@ -457,28 +437,21 @@ def rollout(
             q_state = params_queue.get()
             actor_network_version += 1
 
-        env_recv_time_start = time.time()
         next_obs, rewards, dones, info = envs.recv()
-        env_recv_time.append(time.time() - env_recv_time_start)
         truncated = info["elapsed_step"] >= envs.spec.config.max_episode_steps
         firststeps = info['elapsed_step'] == 0
         env_id = info["env_id"]
 
-        get_action_h2d_time_start = time.time()
+        # ALGO LOGIC: put action logic here
         d_next_obs = jax.device_put(next_obs, actor_device)
         d_epsilon_values = jax.device_put(epsilon_values, actor_device)
         d_subkey = jax.device_put(subkey, actor_device)
-        get_action_h2d_time.append(time.time() - get_action_h2d_time_start)
-        get_action_time_start = time.time()
-        next_q_values, next_actions = get_action(q_state.params, d_next_obs, d_epsilon_values, d_subkey)
-        get_action_d2h_time_start = time.time()
-        next_actions = jax.device_get(next_actions)
-        get_action_d2h_time.append(time.time() - get_action_d2h_time_start)
-        get_action_time.append(time.time() - get_action_time_start)
+        d_next_q_values, d_next_actions = get_action(q_state.params, d_next_obs, d_epsilon_values, d_subkey)
+        next_q_values = np.array(d_next_q_values)
+        next_actions = np.array(d_next_actions)
 
-        env_send_time_start = time.time()
+        # TRY NOT TO MODIFY: execute the game and log data.
         envs.send(next_actions)
-        env_send_time.append(time.time() - env_send_time_start)
 
         # info["TimeLimit.truncated"] has a bug https://github.com/sail-sg/envpool/issues/239
         # so we use our own truncated flag
@@ -497,50 +470,38 @@ def rollout(
         )
         episode_lengths[env_id] *= (1 - info["terminated"]) * (1 - truncated)
 
-        learner_sps = int(global_step / (time.time() - data_generation_start))
-        sps_store.append((learner_sps, global_step))
+        if thread_id == 0:
+            ratio_store['actor_sps'] = global_step / (time.time() - data_generation_start)
+            if step % args.log_interval == 0 and step > 0:
+                print(f"global_step={global_step}, SPS: {int(ratio_store['actor_sps'])} episodic_return={np.mean(returned_episode_returns):.2f}, episodic_length={returned_episode_lengths.mean():.2f}")
+                writer.add_scalar("charts/actor/episodic_return", np.mean(returned_episode_returns), global_step)
+                writer.add_scalar("charts/actor/episodic_length", np.mean(returned_episode_lengths), global_step)
+                writer.add_scalar("charts/actor/max_episodic_return", np.max(returned_episode_returns), global_step)
+                writer.add_scalar("charts/actor/argmax_episodic_return", np.argmax(returned_episode_lengths), global_step)
+                if len(running_greedy_episodic_return) != 0:
+                    writer.add_scalar("charts/actor/avg_greedy_episodic_return", np.mean(running_greedy_episodic_return), global_step)
+                    writer.add_scalar("charts/actor/greedy_episodic_return", running_greedy_episodic_return[-1], global_step)
 
-        storage_time_start = time.time()
         if len(storage) != 0:
             obs, q_values, actions, last_env_ids = storage.pop()
             assert np.all(last_env_ids == env_id)
             local_buffer.append(
                 Transition(obs, q_values, actions, rewards, dones, firststeps)
             )
-        storage_time.append(time.time() - storage_time_start)
 
         if len(local_buffer) == args.rollout_length:
-            local_queue.put((local_buffer, q_state))
+            local_queue.put((local_buffer, q_state, actor_device))
             local_buffer = local_buffer[-1:]
 
-        # "next" indicates that the variable corresponds to the next iteration of the loop
+        # NOTE: "next" indicates that the variable corresponds to the next iteration of the loop
         storage.append((next_obs, next_q_values, next_actions, env_id))
 
-        if step % args.log_interval == 0 and step > 0 and thread_id == 0:
-            print(f"global_step={global_step}, SPS: {learner_sps} episodic_return={np.mean(returned_episode_returns):.2f}, episodic_length={returned_episode_lengths.mean():.2f}")
-            writer.add_scalar("charts/episodic_return", np.mean(returned_episode_returns), global_step)
-            writer.add_scalar("charts/episodic_length", np.mean(returned_episode_lengths), global_step)
-            writer.add_scalar("charts/max_episodic_return", np.max(returned_episode_returns), global_step)
-            writer.add_scalar("charts/argmax_episodic_return", np.argmax(returned_episode_lengths), global_step)
-            if len(running_greedy_episodic_return) != 0:
-                writer.add_scalar("charts/avg_greedy_episodic_return", np.mean(running_greedy_episodic_return), global_step)
-                writer.add_scalar("charts/greedy_episodic_return", running_greedy_episodic_return[-1], global_step)
-            writer.add_scalar("stats/actor/env_recv_time", np.mean(env_recv_time), global_step)
-            writer.add_scalar("stats/actor/get_action_h2d_time", np.mean(get_action_h2d_time), global_step)
-            writer.add_scalar("stats/actor/get_action_time", np.mean(get_action_time), global_step)
-            writer.add_scalar("stats/actor/get_action_d2h_time", np.mean(get_action_d2h_time), global_step)
-            writer.add_scalar("stats/actor/storage_time", np.mean(storage_time), global_step)
-            if rb.thread_safe_ready(args.learning_starts):
-                writer.add_scalar("stats/actor/local_buffer_get_time", np.mean(local_buffer_get_time), global_step)
-                writer.add_scalar("stats/actor/make_rollout_time", np.mean(make_rollout_time), global_step)
-                writer.add_scalar("stats/actor/calculate_priorities_time", np.mean(calculate_priorities_time), global_step)
-                writer.add_scalar("stats/actor/replay_buffer_add_time", np.mean(replay_buffer_add_time), global_step)
-
-        time.sleep(0.015)
+        while rb.thread_safe_ready(args.learning_starts) and ratio_store['actor_sps'] / ratio_store['learner_sps'] > 800:
+            time.sleep(0.01)
 
 
 if __name__ == "__main__":
-    args = tyro.cli(Args)
+    args = Args()
     
     devices = jax.devices()
     actor_devices = [devices[i] for i in args.actor_device_ids]
@@ -588,7 +549,7 @@ if __name__ == "__main__":
         capacity=args.buffer_size,
         length=args.rollout_length,
         valid_length=args.valid_length,
-        n_envs=args.n_envs,
+        n_envs=args.n_envs * len(args.actor_device_ids) * args.num_actor_threads,
         seed=args.seed,
         alpha=args.alpha,
         beta=args.beta,
@@ -656,16 +617,16 @@ if __name__ == "__main__":
         q_state = q_state.apply_gradients(grads=grads)
         return loss_value, q_pred, priorities, q_state
 
-    multi_device_update = jax.pmap(
-        single_device_update,
-        axis_name="local_devices",
-        devices=learner_devices
-    )
+    multi_device_update = jax.pmap(single_device_update, axis_name="local_devices", devices=learner_devices)
 
+    actor_to_buffer_queue = queue.Queue(maxsize=args.num_actor_threads * len(args.actor_device_ids))
+    threading.Thread(target=local_buffer_to_replay_buffer, args=(actor_to_buffer_queue, rb)).start()
+
+    from types import SimpleNamespace
     dummy_writer = SimpleNamespace()
     dummy_writer.add_scalar = lambda x, y, z: None
-    actor_sps_store = deque(maxlen=10)
 
+    ratio_store = {"actor_sps": 1e-6,"learner_sps": 1e-6}
     param_queues = []
     unreplicated_q_state = flax.jax_utils.unreplicate(q_state)
     for device_id, device  in enumerate(actor_devices):
@@ -677,7 +638,16 @@ if __name__ == "__main__":
             to_use_writer = dummy_writer if thread_id > 0 else writer
             threading.Thread(
                 target=rollout,
-                args=(args, rb, params_queue, to_use_writer, device_id * args.num_actor_threads + thread_id, device, actor_sps_store)
+                args=(
+                    args,
+                    rb,
+                    params_queue,
+                    to_use_writer,
+                    device_id * args.num_actor_threads + thread_id,
+                    device,
+                    actor_to_buffer_queue,
+                    ratio_store
+                    )
                 ).start()
             param_queues.append(params_queue)
 
@@ -701,6 +671,15 @@ if __name__ == "__main__":
             queue.put((batch, inds, np.mean(sample_batch_time), np.mean(device_put_time)))
 
     threading.Thread(target=prefetch_batches, args=(rb, batch_queue, learner_devices[0])).start()
+    
+    priority_queue = queue.Queue(maxsize=args.n_prefetch)
+    def update_priorities(rb, queue):
+        while True:
+            updated_priorities, inds = queue.get()
+            updated_priorities = updated_priorities.reshape(-1) # TODO: make sure order is preserved CRITICAL (you can pass a range and see if it is recovered on the way out)
+            updated_priorities = np.array(updated_priorities)
+            rb.thread_safe_update_priorities(inds, updated_priorities)
+    threading.Thread(target=update_priorities, args=(rb, priority_queue)).start()
 
     @jax.jit
     def split_data(data):
@@ -709,13 +688,11 @@ if __name__ == "__main__":
     args.total_train_steps = args.total_timesteps // args.batch_size
     print(f"Starting training for {args.total_train_steps} steps")
     start_time = time.time()
-    learner_network_version = 0
+    train_step = 0
     get_batch_time = deque(maxlen=10)
     update_time = deque(maxlen=10)
-    update_priorities_time = deque(maxlen=10)
-    put_params_time = deque(maxlen=10)
     while True:
-        learner_network_version += 1
+        train_step += 1
 
         # get a batch
         get_batch_time_start = time.time()
@@ -732,49 +709,42 @@ if __name__ == "__main__":
             q_state,
             sharded_batch,
         )
-        updated_priorities = updated_priorities.reshape(-1)
-        updated_priorities = np.array(updated_priorities) # you can remove this and make the transfer device op happen in buffer preventing from blocking training 
         update_time.append(time.time() - update_time_start)
-        loss = loss.mean(0)
-        q_value = q_value.mean(0)
-
-        update_priorities_time_start = time.time()
-        rb.update_priorities(inds, updated_priorities)
-        update_priorities_time.append(time.time() - update_priorities_time_start)
+        priority_queue.put((updated_priorities, inds))
 
         # put the updated params to the actors
-        put_params_time_start = time.time()
         unreplicated_q_state = flax.jax_utils.unreplicate(q_state)
         for d_idx, d_id in enumerate(args.actor_device_ids):
             device_params = jax.device_put(unreplicated_q_state, devices[d_id])
             for thread_id in range(args.num_actor_threads):
                 param_queues[d_idx * args.num_actor_threads + thread_id].put(device_params)
-        put_params_time.append(time.time() - put_params_time_start)
 
-        actor_sps, global_step = actor_sps_store[0]
-        learner_sps = learner_network_version / (time.time() - start_time)
-        if learner_network_version % 100 == 0:
-            writer.add_scalar("losses/td_loss", jax.device_get(loss), global_step)
-            writer.add_scalar("losses/q_values", jax.device_get(q_value).mean(), global_step)
-            writer.add_scalar("stats/ratio/actor_sps", actor_sps, global_step)
-            writer.add_scalar("stats/ratio/learner_sps", learner_sps, global_step)
-            writer.add_scalar("stats/learner/get_batch_time", np.mean(get_batch_time), global_step)
-            writer.add_scalar("stats/learner/sample_batch_time", sample_time, global_step)
-            writer.add_scalar("stats/learner/device_put_time", device_put_time, global_step)
-            writer.add_scalar("stats/learner/update_time", np.mean(update_time), global_step)
-            writer.add_scalar("stats/learner/update_priorities_time", np.mean(update_priorities_time), global_step)
-            writer.add_scalar("stats/learner/put_params_time", np.mean(put_params_time), global_step)
-            writer.add_scalar("stats/learner/batch_queue_size", batch_queue.qsize(), global_step)
-            writer.add_scalar("charts/learner_network_version", learner_network_version, global_step)
-            print(f"TSPS: {int(learner_network_version / (time.time() - start_time))} q_value {jax.device_get(q_value).mean():.3f} step {learner_network_version} update time {np.mean(update_time):.3f} batch_queue size {batch_queue.qsize()}")
+        ratio_store['learner_sps'] = train_step / (time.time() - start_time)
+        ratio = ratio_store['actor_sps'] / ratio_store['learner_sps']
+        if train_step % 100 == 0:
+            writer.add_scalar("losses/td_loss", jax.device_get(loss).mean(), train_step)
+            writer.add_scalar("losses/q_values", jax.device_get(q_value).mean(), train_step)
+            writer.add_scalar("charts/learner/SPS", train_step / (time.time() - start_time), train_step)
+            writer.add_scalar("charts/learner/get_batch_time", np.mean(get_batch_time), train_step)
+            writer.add_scalar("charts/learner/sample_batch_time", sample_time, train_step)
+            writer.add_scalar("charts/learner/device_put_time", device_put_time, train_step)
+            writer.add_scalar("charts/learner/update_time", np.mean(update_time), train_step)
+            print(f"TSPS: {int(ratio_store['learner_sps'])}, ratio {ratio:.2f}, q_value {jax.device_get(q_value).mean():.3f} step {train_step} update time {np.mean(update_time):.3f} batch_queue size {batch_queue.qsize()}")
+            # replay buffer metrics
+            writer.add_scalar("charts/buffer/add_time", np.mean(rb.add_time), train_step)
+            writer.add_scalar("charts/buffer/add_time_delta", np.mean(rb.lock_add_time) - np.mean(rb.add_time), train_step)
+            writer.add_scalar("charts/buffer/sample_time", np.mean(rb.sample_time), train_step)
+            writer.add_scalar("charts/buffer/sample_time_delta", np.mean(rb.lock_sample_time) - np.mean(rb.sample_time), train_step)
+            writer.add_scalar("charts/buffer/update_priorities_time", np.mean(rb.update_priorities_time), train_step)
+            writer.add_scalar("charts/buffer/update_priorities_time_delta", np.mean(rb.lock_update_priorities_time) - np.mean(rb.update_priorities_time), train_step)
 
-        if learner_network_version % args.target_network_frequency == 0:
+        if train_step % args.target_network_frequency == 0:
             q_state = q_state.replace(target_params=q_state.params)
 
-        if learner_network_version == args.total_train_steps:
+        if train_step == args.total_train_steps:
             break
 
     envs.close()
     writer.close()
-
+    
     sys.exit()
