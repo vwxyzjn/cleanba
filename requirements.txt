@@ -1,0 +1,9 @@
+envpool==0.8.1
+gym==0.23.1
+rlax
+flax
+optax
+distrax
+wandb
+psutil
+tensorboardX

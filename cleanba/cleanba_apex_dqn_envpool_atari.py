@@ -24,143 +24,13 @@ from flax.training.train_state import TrainState
 from tensorboardX import SummaryWriter
 
 
-class Batch(NamedTuple):
-    obs: np.ndarray
-    bootstrap_obs: np.ndarray
-    actions: np.ndarray
-    rewards: np.ndarray
-    dones: np.ndarray
-    firststeps: np.ndarray
-    weights: np.ndarray
-
-class PERReplayBuffer:
-    """
-    Replay buffer for storing rollouts of trajectories.
-
-    """
-    def __init__(
-        self, capacity: int, length: int, valid_length: int,
-        n_envs: int, seed: int = 0, alpha: float = 1., beta: float = 1.,
-        ) -> None:
-        self.capacity = capacity
-        self.length = length
-        self.valid_length = valid_length
-        self.n = self.length - self.valid_length # bootstrap length
-        self.n_envs = n_envs
-        self.pos = 0
-        self.is_setup = False
-        self.rng = np.random.default_rng(seed)
-        
-        self.alpha = alpha
-        self.beta = beta
-        
-        self.is_setup = False
-        self.full = False
-        self.timesteps_seen = 0
-
-        assert self.capacity % self.n_envs == 0, "Capacity must be evenly divisible by n_envs"
-
-    def _setup(self, example: NamedTuple):
-        assert len(example.rewards.shape) == 2, "Rewards must be scalars (i.e. shape (n_envs, length,)))"
-        shapes = {k: v.shape[2:] for k, v in example._asdict().items()}
-        dtype = {k: v.dtype for k, v in example._asdict().items()}
-        self._check_memory(example)
-
-        self.priorities = np.zeros((self.capacity, self.valid_length), dtype=np.float32)
-        self.obs = np.zeros((self.capacity, self.length, *shapes['obs']), dtype=dtype['obs'])
-        self.actions = np.zeros((self.capacity, self.length, *shapes['actions']), dtype=dtype['actions'])
-        self.rewards = np.zeros((self.capacity, self.length, *shapes['rewards']), dtype=dtype['rewards'])
-        self.dones = np.zeros((self.capacity, self.length, *shapes['dones']), dtype=dtype['dones'])
-        self.firststeps = np.zeros((self.capacity, self.length, *shapes['firststeps']), dtype=dtype['firststeps'])
-
-        self.is_setup = True
-
-    def add(self, priorities: np.ndarray, rollout: NamedTuple):
-        assert priorities.shape == (self.n_envs, self.valid_length), "Priorities must be shape (n_envs, valid_length)"
-        if not self.is_setup:
-            self._setup(rollout)
-        indexer = slice(self.pos, self.pos + self.n_envs)
-
-        self.priorities[indexer] = np.array(priorities).copy()
-        self.obs[indexer] = np.array(rollout.obs).copy()
-        self.actions[indexer] = np.array(rollout.actions).copy()
-        self.rewards[indexer] = np.array(rollout.rewards).copy()
-        self.actions[indexer] = np.array(rollout.actions).copy()
-        self.dones[indexer] = np.array(rollout.dones).copy()
-        self.firststeps[indexer] = np.array(rollout.firststeps).copy()
-
-        self.timesteps_seen += self.n_envs * self.length
-        self.pos = self.pos + self.n_envs
-        if self.pos >= self.capacity:
-            self.full = True
-            self.pos = 0
-
-    def sample(self, batch_size: int):
-        assert self.is_setup, "Replay buffer must be setup before sampling"
-        inds, weights = self._priority_sampling(batch_size)
-        return self._get_samples(inds, weights), inds
-
-    def _priority_sampling(self, batch_size: int):
-        N = self.capacity * self.valid_length # (number of rollouts * indexable length)
-
-        sample_probs = self.priorities.flatten() ** self.alpha
-        sample_probs /= sample_probs.sum() 
-        sampled_inds = self.rng.choice(N, batch_size, p=sample_probs, replace=False)
-
-        importance_sampling_weights = (N * sample_probs[sampled_inds]) ** -self.beta
-        importance_sampling_weights /= importance_sampling_weights.max()
-        return sampled_inds, importance_sampling_weights
-
-    def _get_samples(self, inds, weights: np.ndarray):
-        r, t = np.unravel_index(inds, self.priorities.shape) # rollout index, transition index
-        btsrp = t + self.n # next transition
-        n_range = np.arange(self.n)
-        t_to_n = t[:, None] + n_range[None,] # transition to bootstrap transition
-        batch = Batch(
-            obs=self.obs[r, t],
-            bootstrap_obs=self.obs[r, btsrp],
-            actions=self.actions[r, t],
-            rewards=self.rewards[r[:, None], t_to_n],
-            dones=self.dones[r[:, None], t_to_n],
-            firststeps=self.firststeps[r, t],
-            weights=weights,
-        )
-        return batch
-    
-    def update_priorities(self, inds: np.ndarray, updated_priorities: np.ndarray):
-        b, t = np.unravel_index(inds, self.priorities.shape)
-        self.priorities[b, t] = updated_priorities
-    
-    def size(self):
-        return self.pos if not self.full else self.capacity
-    
-    def ready(self, min_size: int):
-        return self.timesteps_seen > min_size
-    
-    def _check_memory(self, rollout: NamedTuple):
-        shapes = {k: v.shape[1:] for k, v in rollout._asdict().items()} # remove n_envs
-        rollout_bytes = sum(np.prod(shape) for shape in shapes.values())
-        total_bytes = self.capacity  * rollout_bytes
-        if psutil is not None:
-            avail_bytes = psutil.virtual_memory().available
-        if total_bytes > avail_bytes:
-            avail_bytes /= 1024 ** 3
-            total_bytes /= 1024 ** 3
-            warnings.warn(
-                """This system does not have enough memory to store the replay buffer.
-                Available memory: {avail_bytes:.2f} GB
-                Required memory: {total_bytes:.2f} GB
-                Difference: {avail_bytes - total_bytes:.2f} GB"""
-            )
-
-
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__).rstrip(".py")
     "the name of this experiment"
     seed: int = 1
     "the seed of the experiment"
-    track: bool = True
+    track: bool = False
     "if toggled, this experiment will be tracked with Weights and Biases"
     wandb_project_name: str = "ApeX DQN"
     "the wandb's project name"
@@ -182,7 +52,7 @@ class Args:
     "the learning rate of the optimizer"
     n_envs: int = 200
     "the number of parallel game environments"
-    buffer_size: int = 10_000 # TODO
+    buffer_size: int = 10000
     "the replay memory buffer size"
     rollout_length: int = 100
     "the number of transitions to collect before sending to the replay memory"
@@ -211,9 +81,10 @@ class Args:
 
     actor_device_ids = [0]
     "actor devices"
-    learner_device_ids = [2, 3]
+    learner_device_ids = [0]
     "learner devices"
     num_actor_threads: int = 2
+
 
 ATARI_MAX_FRAMES = 108_000 // 4
 
@@ -238,58 +109,137 @@ def make_env(env_id, seed, num_envs=1):
         return envs
     return thunk
 
-def scale_gradient(x: jnp.ndarray, scale: float) -> jnp.ndarray:
-    """Multiplies the gradient of `x` by `scale`."""
-    @jax.custom_gradient
-    def wrapped(x: jnp.ndarray):
-        return x, lambda grad: (grad * scale,)
-    return wrapped(x)
+
+class Batch(NamedTuple):
+    obs: np.ndarray
+    bootstrap_obs: np.ndarray
+    actions: np.ndarray
+    rewards: np.ndarray
+    dones: np.ndarray
+    firststeps: np.ndarray
+    weights: np.ndarray
 
 
-class QNetwork(nn.Module):
-    action_dim: int
-    scale: float = 1 / jnp.sqrt(2)
+class ReplayBuffer:
+    """ Prioritized Experience Replay buffer for storing rollouts of trajectories """
+    def __init__(
+        self,
+        capacity: int,
+        length: int,
+        bootstrap_n: int,
+        n_envs: int,
+        seed: int,
+        alpha: float = 0.6,
+        beta: float = 0.4,
+    ):
+        self.capacity = capacity
+        self.length = length
+        self.n = bootstrap_n
+        self.n_envs = n_envs
+        self.pos = 0
+        self.alpha = alpha
+        self.beta = beta
+        self.is_setup = False
+        self.full = False
+        self.timesteps_seen = 0
+        self.rng = np.random.default_rng(seed)
 
-    @nn.compact
-    def __call__(self, x):
-        x = jnp.transpose(x, (0, 2, 3, 1))
-        x = x / (255.0)
-        x = nn.Conv(32, kernel_size=(8, 8), strides=(4, 4), padding="VALID")(x)
-        x = nn.relu(x)
-        x = nn.Conv(64, kernel_size=(4, 4), strides=(2, 2), padding="VALID")(x)
-        x = nn.relu(x)
-        x = nn.Conv(64, kernel_size=(3, 3), strides=(1, 1), padding="VALID")(x)
-        x = nn.relu(x)
-        x = x.reshape((x.shape[0], -1))
-        
-        # x = scale_gradient(x, self.scale)
+        assert self.capacity % self.n_envs == 0, "capacity must be evenly divisible by n_envs"
 
-        # value stream
-        v = nn.Dense(512)(x)
-        v = nn.relu(v)
-        value = nn.Dense(1)(v)
-        
-        # adv stream
-        a = nn.Dense(512)(x)
-        a = nn.relu(a)
-        adv = nn.Dense(self.action_dim)(a)
-        
-        q_values = value + (adv - jnp.mean(adv, axis=1, keepdims=True))
-        return q_values
+    def add(self, priorities: np.ndarray, rollout: NamedTuple):
+        assert priorities.shape == (self.n_envs, self.length), "Priorities must be shape (n_envs, length)"
+        if not self.is_setup:
+            self._setup(rollout)
 
-class TrainState(TrainState):
-    target_params: flax.core.FrozenDict
+        indexer = slice(self.pos, self.pos + self.n_envs)
+        self.priorities[indexer] = np.array(priorities).copy()
+        self.obs[indexer] = np.array(rollout.obs).copy()
+        self.actions[indexer] = np.array(rollout.actions).copy()
+        self.rewards[indexer] = np.array(rollout.rewards).copy()
+        self.actions[indexer] = np.array(rollout.actions).copy()
+        self.dones[indexer] = np.array(rollout.dones).copy()
+        self.firststeps[indexer] = np.array(rollout.firststeps).copy()
 
-def epilson_values_fn(N):
-    i_range = jnp.arange(N)
-    epsilon_values = args.epsilon ** (1 + (i_range / (N - 1)) * args.epsilon_greedy_alpha)
-    return jnp.expand_dims(epsilon_values, axis=-1)
+        self.timesteps_seen += self.n_envs * self.length
+        self.pos = self.pos + self.n_envs
+        if self.pos >= self.capacity:
+            self.full = True
+            self.pos = 0
 
-class ThreadSafeReplayBuffer(PERReplayBuffer):
+    def sample(self, batch_size: int):
+        assert self.is_setup, "buffer must be setup before sampling"
+        inds, weights = self._priority_sampling(batch_size)
+        return self._get_samples(inds, weights), inds
+
+    def update_priorities(self, inds: np.ndarray, updated_priorities: np.ndarray):
+        r, t = np.unravel_index(inds, self.priorities.shape)
+        self.priorities[r, t] = updated_priorities
+
+    def size(self):
+        return self.pos if not self.full else self.capacity
+    
+    def ready(self, min_size: int):
+        return self.timesteps_seen > min_size
+
+    def _setup(self, example: NamedTuple):
+        assert len(example.rewards.shape) == 2, "Rewards must be scalars (i.e. shape (n_envs, length,)))"
+
+        self._check_memory(example)
+        shapes = {k: v.shape[2:] for k, v in example._asdict().items()}
+        dtype = {k: v.dtype for k, v in example._asdict().items()}
+
+        self.priorities = np.zeros((self.capacity, self.length), dtype=np.float32)
+        self.obs = np.zeros((self.capacity, self.length + self.n, *shapes['obs']), dtype=dtype['obs'])
+        self.actions = np.zeros((self.capacity, self.length + self.n, *shapes['actions']), dtype=dtype['actions'])
+        self.rewards = np.zeros((self.capacity, self.length + self.n, *shapes['rewards']), dtype=dtype['rewards'])
+        self.dones = np.zeros((self.capacity, self.length + self.n, *shapes['dones']), dtype=dtype['dones'])
+        self.firststeps = np.zeros((self.capacity, self.length + self.n, *shapes['firststeps']), dtype=dtype['firststeps'])
+        self.is_setup = True
+
+    def _priority_sampling(self, batch_size: int):
+        N = self.capacity * self.length
+        sample_probs = self.priorities.flatten() ** self.alpha
+        sample_probs /= sample_probs.sum() 
+        sampled_inds = self.rng.choice(N, batch_size, p=sample_probs, replace=False)
+        importance_sampling_weights = (N * sample_probs[sampled_inds]) ** -self.beta
+        importance_sampling_weights /= importance_sampling_weights.max()
+        return sampled_inds, importance_sampling_weights
+
+    def _get_samples(self, inds, weights: np.ndarray):
+        r, t = np.unravel_index(inds, self.priorities.shape)
+        t_to_n = t[:, None] + np.arange(self.n)[None,] 
+        return Batch(
+            obs=self.obs[r, t],
+            bootstrap_obs=self.obs[r, t + self.n],
+            actions=self.actions[r, t],
+            rewards=self.rewards[r[:, None], t_to_n],
+            dones=self.dones[r[:, None], t_to_n],
+            firststeps=self.firststeps[r, t],
+            weights=weights)
+
+    def _check_memory(self, rollout: NamedTuple):
+        shapes = {k: v.shape[1:] for k, v in rollout._asdict().items()} # remove n_envs
+        rollout_bytes = sum(np.prod(shape) for shape in shapes.values())
+        total_bytes = self.capacity  * rollout_bytes
+        if psutil is not None:
+            avail_bytes = psutil.virtual_memory().available
+        if total_bytes > avail_bytes:
+            avail_bytes /= 1024 ** 3
+            total_bytes /= 1024 ** 3
+            warnings.warn(
+                """This system does not have enough memory to store the replay buffer.
+                Available memory: {avail_bytes:.2f} GB
+                Required memory: {total_bytes:.2f} GB
+                Difference: {avail_bytes - total_bytes:.2f} GB"""
+            )
+
+
+class ThreadSafeReplayBuffer(ReplayBuffer):
+    """ Implements lock on all class methods and timers """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.lock = threading.Lock()
-
         self.lock_add_time = deque(maxlen=10)
         self.add_time = deque(maxlen=10)
         self.lock_sample_time = deque(maxlen=10)
@@ -325,6 +275,50 @@ class ThreadSafeReplayBuffer(PERReplayBuffer):
         with self.lock:
             return self.ready(min_size)
 
+
+class QNetwork(nn.Module):
+    action_dim: int
+    scale: float = 1 / jnp.sqrt(2)
+
+    @nn.compact
+    def __call__(self, x):
+        x = jnp.transpose(x, (0, 2, 3, 1))
+        x = x / (255.0)
+        x = nn.Conv(32, kernel_size=(8, 8), strides=(4, 4), padding="VALID")(x)
+        x = nn.relu(x)
+        x = nn.Conv(64, kernel_size=(4, 4), strides=(2, 2), padding="VALID")(x)
+        x = nn.relu(x)
+        x = nn.Conv(64, kernel_size=(3, 3), strides=(1, 1), padding="VALID")(x)
+        x = nn.relu(x)
+        x = x.reshape((x.shape[0], -1))
+
+        x = self.scale_gradient(x, self.scale)
+
+        # value stream
+        v = nn.Dense(512)(x)
+        v = nn.relu(v)
+        value = nn.Dense(1)(v)
+        
+        # adv stream
+        a = nn.Dense(512)(x)
+        a = nn.relu(a)
+        adv = nn.Dense(self.action_dim)(a)
+        
+        q_values = value + (adv - jnp.mean(adv, axis=1, keepdims=True))
+        return q_values
+    
+    def scale_gradient(self, x: jnp.ndarray, scale: float) -> jnp.ndarray:
+        """Multiplies the gradient of `x` by `scale`."""
+        @jax.custom_gradient
+        def wrapped(x: jnp.ndarray):
+            return x, lambda grad: (grad * scale,)
+        return wrapped(x)
+
+
+class TrainState(TrainState):
+    target_params: flax.core.FrozenDict
+
+
 class Transition(NamedTuple):
     obs: list
     q_values: list
@@ -350,7 +344,7 @@ def calculate_priorities(rollout, q_state):
 
     @jax.vmap
     def calculate_priorities_over_envs_dim(_q_tm1, _a_tm1, _r_t, _dones_t, _q_tpn_val, _q_tpn_select): 
-        i_range = jnp.arange(args.valid_length)
+        i_range = jnp.arange(args.rollout_length)
 
         @jax.vmap
         def calculate_priorities_over_rollout_dim(i):
@@ -374,9 +368,8 @@ def calculate_priorities(rollout, q_state):
         q_tm1, a_tm1, r_t, dones_t, q_tpn_val, q_tpn_select
     )
 
-    return jnp.abs(td_error).reshape(args.n_envs, args.valid_length)
+    return jnp.abs(td_error).reshape(args.n_envs, args.rollout_length)
 
-# STOP HERE # # # # 
 def local_buffer_to_replay_buffer(queue, rb):
     priority_storage = []
     rollout_storage = []
@@ -395,6 +388,11 @@ def local_buffer_to_replay_buffer(queue, rb):
             rb.thread_safe_add(priorities, rollouts)
             priority_storage = []
             rollout_storage = []
+
+def epilson_values_fn(N):
+    i_range = jnp.arange(N)
+    epsilon_values = args.epsilon ** (1 + (i_range / (N - 1)) * args.epsilon_greedy_alpha)
+    return jnp.expand_dims(epsilon_values, axis=-1)
 
 @jax.jit
 def get_action(params, obs, epsilon, rng):
@@ -418,7 +416,6 @@ def rollout(
 
     key = jax.random.PRNGKey(args.seed)
 
-    # TRY NOT TO MODIFY: start the game
     episode_returns = np.zeros((args.n_envs,), dtype=np.float32)
     returned_episode_returns = np.zeros((args.n_envs,), dtype=np.float32)
     episode_lengths = np.zeros((args.n_envs,), dtype=np.float32)
@@ -442,7 +439,6 @@ def rollout(
         firststeps = info['elapsed_step'] == 0
         env_id = info["env_id"]
 
-        # ALGO LOGIC: put action logic here
         d_next_obs = jax.device_put(next_obs, actor_device)
         d_epsilon_values = jax.device_put(epsilon_values, actor_device)
         d_subkey = jax.device_put(subkey, actor_device)
@@ -450,7 +446,6 @@ def rollout(
         next_q_values = np.array(d_next_q_values)
         next_actions = np.array(d_next_actions)
 
-        # TRY NOT TO MODIFY: execute the game and log data.
         envs.send(next_actions)
 
         # info["TimeLimit.truncated"] has a bug https://github.com/sail-sg/envpool/issues/239
@@ -460,7 +455,6 @@ def rollout(
         returned_episode_returns[env_id] = np.where(
             info["terminated"] + truncated, episode_returns[env_id], returned_episode_returns[env_id]
         )
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
         if info['terminated'][-1] or truncated[-1]:
             running_greedy_episodic_return.append(episode_returns[-1])
         episode_returns[env_id] *= (1 - info["terminated"]) * (1 - truncated)
@@ -489,11 +483,10 @@ def rollout(
                 Transition(obs, q_values, actions, rewards, dones, firststeps)
             )
 
-        if len(local_buffer) == args.rollout_length:
+        if len(local_buffer) == args.rollout_length + args.bootstrap_length:
             local_queue.put((local_buffer, q_state, actor_device))
             local_buffer = local_buffer[-1:]
 
-        # NOTE: "next" indicates that the variable corresponds to the next iteration of the loop
         storage.append((next_obs, next_q_values, next_actions, env_id))
 
         while rb.thread_safe_ready(args.learning_starts) and ratio_store['actor_sps'] / ratio_store['learner_sps'] > 800:
@@ -543,12 +536,10 @@ if __name__ == "__main__":
     )
     q_state = flax.jax_utils.replicate(q_state, learner_devices)
 
-    args.rollout_length = args.rollout_length + args.bootstrap_length
-    args.valid_length = args.rollout_length - args.bootstrap_length
     rb = ThreadSafeReplayBuffer(
         capacity=args.buffer_size,
         length=args.rollout_length,
-        valid_length=args.valid_length,
+        bootstrap_n=args.bootstrap_length,
         n_envs=args.n_envs * len(args.actor_device_ids) * args.num_actor_threads,
         seed=args.seed,
         alpha=args.alpha,
@@ -562,8 +553,8 @@ if __name__ == "__main__":
         Args:
             q_tm1: Q-values at time t-1
             a_tm1: actions at time t-1
-            r_tn: rewards at time t, t+1, ..., t+n
-            dones_tn: dones at time t, t+1, ..., t+n
+            r_tn: rewards at time [t, t+1, ..., t+n]
+            dones_tn: dones at time [t, t+1, ..., t+n]
             q_tpn_value: Q-values at time t+n
             q_tpn_selector: Q-values at time t+n
         """
