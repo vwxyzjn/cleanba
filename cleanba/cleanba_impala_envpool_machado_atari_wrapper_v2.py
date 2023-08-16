@@ -61,7 +61,7 @@ class Args:
     "the learning rate of the optimizer"
     local_num_envs: int = 60
     "the number of parallel game environments"
-    num_steps: int = 128
+    num_steps: int = 20
     "the number of steps to run in each environment per policy rollout"
     anneal_lr: bool = True
     "Toggle learning rate annealing for policy and value networks"
@@ -71,20 +71,12 @@ class Args:
     "the lambda for the general advantage estimation"
     num_minibatches: int = 4
     "the number of mini-batches"
-    update_epochs: int = 4
-    "the K epochs to update the policy"
-    norm_adv: bool = True
-    "Toggles advantages normalization"
-    clip_coef: float = 0.1
-    "the surrogate clipping coefficient"
     ent_coef: float = 0.01
     "coefficient of the entropy"
     vf_coef: float = 0.5
     "coefficient of the value function"
     max_grad_norm: float = 0.5
     "the maximum norm for the gradient clipping"
-    target_kl: float = None
-    "the target KL divergence threshold"
     channels: List[int] = field(default_factory=lambda: [16, 32, 32])
     "the channels of the CNN"
     hiddens: List[int] = field(default_factory=lambda: [256])
@@ -123,7 +115,7 @@ ATARI_MAX_FRAMES = int(
 )  # 108000 is the max number of frames in an Atari game, divided by 4 to account for frame skipping
 
 
-def make_env(env_id, seed, num_envs, async_batch_size=1):
+def make_env(env_id, seed, num_envs):
     def thunk():
         envs = envpool.make(
             env_id,
@@ -146,6 +138,56 @@ def make_env(env_id, seed, num_envs, async_batch_size=1):
 
     return thunk
 
+
+### RMSProp implementation for PyTorch-style RMSProp
+# see https://github.com/deepmind/optax/issues/532#issuecomment-1676371843
+# fmt: off
+import jax
+import jax.numpy as jnp
+from optax import update_moment, update_moment_per_elem_norm
+from optax._src.alias import _scale_by_learning_rate, ScalarOrSchedule
+from optax._src import base, utils, combine, numerics
+from optax._src import transform
+from optax._src.transform import ScaleByRmsState
+
+def scale_by_rms_pytorch_style(
+    decay: float = 0.9,
+    eps: float = 1e-8,
+    initial_scale: float = 0.
+) -> base.GradientTransformation:
+  """See https://github.com/deepmind/optax/issues/532#issuecomment-1676371843"""
+
+  def init_fn(params):
+    nu = jax.tree_util.tree_map(
+        lambda n: jnp.full_like(n, initial_scale), params)  # second moment
+    return ScaleByRmsState(nu=nu)
+
+  def update_fn(updates, state, params=None):
+    del params
+    nu = update_moment_per_elem_norm(updates, state.nu, decay, 2)
+    updates = jax.tree_util.tree_map(
+        lambda g, n: g / (jax.lax.sqrt(n) + eps), updates, nu)
+    return updates, ScaleByRmsState(nu=nu)
+
+  return base.GradientTransformation(init_fn, update_fn)
+
+
+def rmsprop_pytorch_style(
+    learning_rate: ScalarOrSchedule,
+    decay: float = 0.9,
+    eps: float = 1e-8,
+    initial_scale: float = 0.,
+    momentum: Optional[float] = None,
+    nesterov: bool = False
+) -> base.GradientTransformation:
+  return combine.chain(
+      scale_by_rms_pytorch_style(
+          decay=decay, eps=eps, initial_scale=initial_scale),
+      _scale_by_learning_rate(learning_rate),
+      (transform.trace(decay=momentum, nesterov=nesterov)
+       if momentum is not None else base.identity())
+  )
+# fmt: on
 
 class ResidualBlock(nn.Module):
     channels: int
@@ -173,8 +215,8 @@ class ConvSequence(nn.Module):
 
 
 class Network(nn.Module):
-    channels: Sequence[int] = (64, 128, 128, 64)
-    hiddens: Sequence[int] = (512, 512)
+    channels: Sequence[int] = (16, 32, 32)
+    hiddens: Sequence[int] = (256,)
 
     @nn.compact
     def __call__(self, x):
@@ -475,7 +517,7 @@ if __name__ == "__main__":
     def linear_schedule(count):
         # anneal learning rate linearly after one training iteration which contains
         # (args.num_minibatches) gradient updates
-        frac = 1.0 - (count // (args.num_minibatches * args.update_epochs)) / args.num_updates
+        frac = 1.0 - (count // (args.num_minibatches)) / args.num_updates
         return args.learning_rate * frac
 
     network = Network(args.channels, args.hiddens)
@@ -511,107 +553,95 @@ if __name__ == "__main__":
         return value
 
     @jax.jit
-    def get_logprob_entropy_value(
+    def get_logits_and_value(
         params: flax.core.FrozenDict,
-        obs: np.ndarray,
-        actions: np.ndarray,
+        x: np.ndarray,
     ):
-        hidden = Network(args.channels, args.hiddens).apply(params.network_params, obs)
-        logits = Actor(envs.single_action_space.n).apply(params.actor_params, hidden)
-        logprob = jax.nn.log_softmax(logits)[jnp.arange(actions.shape[0]), actions]
-        logits = logits - jax.scipy.special.logsumexp(logits, axis=-1, keepdims=True)
-        logits = logits.clip(min=jnp.finfo(logits.dtype).min)
-        p_log_p = logits * jax.nn.softmax(logits)
-        entropy = -p_log_p.sum(-1)
+        hidden = Network(args.channels, args.hiddens).apply(params.network_params, x)
+        raw_logits = Actor(envs.single_action_space.n).apply(params.actor_params, hidden)
         value = Critic().apply(params.critic_params, hidden).squeeze()
-        return logprob, entropy, value
+        return raw_logits, value
 
-    def ppo_loss(params, obs, actions, behavior_logprobs, firststeps, advantages, target_values):
-        # TODO: figure out when to use `mask`
-        # mask = 1.0 - firststeps
-        newlogprob, entropy, newvalue = jax.vmap(get_logprob_entropy_value, in_axes=(None, 0, 0))(params, obs, actions)
-        behavior_logprobs = behavior_logprobs[:-1]
-        newlogprob = newlogprob[:-1]
-        entropy = entropy[:-1]
-        actions = actions[:-1]
-        # mask = mask[:-1]
-        if args.norm_adv:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    def policy_gradient_loss(logits, *args):
+        """rlax.policy_gradient_loss, but with sum(loss) and [T, B, ...] inputs."""
+        mean_per_batch = jax.vmap(rlax.policy_gradient_loss, in_axes=1)(logits, *args)
+        total_loss_per_batch = mean_per_batch * logits.shape[0]
+        return jnp.sum(total_loss_per_batch)
 
-        logratio = newlogprob - behavior_logprobs
-        ratio = jnp.exp(logratio)
-        approx_kl = ((ratio - 1) - logratio).mean()
 
-        # Policy loss
-        pg_loss1 = -advantages * ratio
-        pg_loss2 = -advantages * jnp.clip(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-        pg_loss = jnp.maximum(pg_loss1, pg_loss2).mean()
+    def entropy_loss_fn(logits, *args):
+        """rlax.entropy_loss, but with sum(loss) and [T, B, ...] inputs."""
+        mean_per_batch = jax.vmap(rlax.entropy_loss, in_axes=1)(logits, *args)
+        total_loss_per_batch = mean_per_batch * logits.shape[0]
+        return jnp.sum(total_loss_per_batch)
 
-        # Value loss
-        v_loss = 0.5 * ((newvalue[:-1] - target_values) ** 2).mean()
-        entropy_loss = entropy.mean()
-        loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
-        return loss, (pg_loss, v_loss, entropy_loss, jax.lax.stop_gradient(approx_kl))
+    def impala_loss(params, x, a, logitss, rewards, dones, firststeps):
+        discounts = (1.0 - dones) * args.gamma
+        mask = 1.0 - firststeps
+        policy_logits, newvalue = jax.vmap(get_logits_and_value, in_axes=(None, 0))(params, x)
+
+        v_t = newvalue[1:]
+        # Remove bootstrap timestep from non-timesteps.
+        v_tm1 = newvalue[:-1]
+        policy_logits = policy_logits[:-1]
+        logitss = logitss[:-1]
+        a = a[:-1]
+        mask = mask[:-1]
+        rewards = rewards[:-1]
+        discounts = discounts[:-1]
+
+        rhos = rlax.categorical_importance_sampling_ratios(policy_logits, logitss, a)
+        vtrace_td_error_and_advantage = jax.vmap(rlax.vtrace_td_error_and_advantage, in_axes=1, out_axes=1)
+
+        vtrace_returns = vtrace_td_error_and_advantage(v_tm1, v_t, rewards, discounts, rhos)
+        pg_advs = vtrace_returns.pg_advantage
+        pg_loss = policy_gradient_loss(policy_logits, a, pg_advs, mask)
+
+        baseline_loss = 0.5 * jnp.sum(jnp.square(vtrace_returns.errors) * mask)
+        ent_loss = entropy_loss_fn(policy_logits, mask)
+
+        total_loss = pg_loss
+        total_loss += args.vf_coef * baseline_loss
+        total_loss += args.ent_coef * ent_loss
+        return total_loss, (pg_loss, baseline_loss, ent_loss)
+
 
     @jax.jit
     def single_device_update(
         agent_state: TrainState,
-        sharded_storages: List,
+        sharded_storages: List[Transition],
         key: jax.random.PRNGKey,
     ):
         storage = jax.tree_map(lambda *x: jnp.hstack(x), *sharded_storages)
-        ppo_loss_grad_fn = jax.value_and_grad(ppo_loss, has_aux=True)
-        behavior_logprobs = jax.vmap(lambda logits, action: jax.nn.log_softmax(logits)[jnp.arange(action.shape[0]), action])(
-            storage.logitss, storage.actions
-        )
-        values = jax.vmap(get_value, in_axes=(None, 0))(agent_state.params, storage.obs)
-        discounts = (1.0 - storage.dones) * args.gamma
+        impala_loss_grad_fn = jax.value_and_grad(impala_loss, has_aux=True)
 
-        def gae_advantages(rewards: jnp.array, discounts: jnp.array, values: jnp.array) -> Tuple[jnp.ndarray, jnp.array]:
-            advantages = rlax.truncated_generalized_advantage_estimation(rewards, discounts, args.gae_lambda, values)
-            advantages = jax.lax.stop_gradient(advantages)
-            target_values = values[:-1] + advantages
-            target_values = jax.lax.stop_gradient(target_values)
-            return advantages, target_values
-
-        advantages, target_values = jax.vmap(gae_advantages, in_axes=1, out_axes=1)(storage.rewards[:-1], discounts[:-1], values)
-        def update_epoch(carry, _):
-            agent_state, key = carry
-            key, subkey = jax.random.split(key)
-
-            def update_minibatch(agent_state, minibatch):
-                mb_obs, mb_actions, mb_behavior_logprobs, mb_firststeps, mb_advantages, mb_target_values = minibatch
-                (loss, (pg_loss, v_loss, entropy_loss, approx_kl)), grads = ppo_loss_grad_fn(
-                    agent_state.params,
-                    mb_obs,
-                    mb_actions,
-                    mb_behavior_logprobs,
-                    mb_firststeps,
-                    mb_advantages,
-                    mb_target_values,
-                )
-                grads = jax.lax.pmean(grads, axis_name="local_devices")
-                agent_state = agent_state.apply_gradients(grads=grads)
-                return agent_state, (loss, pg_loss, v_loss, entropy_loss, approx_kl)
-
-            agent_state, (loss, pg_loss, v_loss, entropy_loss, approx_kl) = jax.lax.scan(
-                update_minibatch,
-                agent_state,
-                (
-                    jnp.array(jnp.split(storage.obs, args.num_minibatches, axis=1)),
-                    jnp.array(jnp.split(storage.actions, args.num_minibatches, axis=1)),
-                    jnp.array(jnp.split(behavior_logprobs, args.num_minibatches, axis=1)),
-                    jnp.array(jnp.split(storage.firststeps, args.num_minibatches, axis=1)),
-                    jnp.array(jnp.split(advantages, args.num_minibatches, axis=1)),
-                    jnp.array(jnp.split(target_values, args.num_minibatches, axis=1)),
-                ),
+        def update_minibatch(agent_state, minibatch):
+            mb_obs, mb_actions, mb_logitss, mb_rewards, mb_dones, mb_firststeps = minibatch
+            (loss, (pg_loss, v_loss, entropy_loss)), grads = impala_loss_grad_fn(
+                agent_state.params,
+                mb_obs,
+                mb_actions,
+                mb_logitss,
+                mb_rewards,
+                mb_dones,
+                mb_firststeps,
             )
-            return (agent_state, key), (loss, pg_loss, v_loss, entropy_loss, approx_kl)
-
-        (agent_state, key), (loss, pg_loss, v_loss, entropy_loss, approx_kl) = jax.lax.scan(
-            update_epoch, (agent_state, key), (), length=args.update_epochs
+            grads = jax.lax.pmean(grads, axis_name="local_devices")
+            agent_state = agent_state.apply_gradients(grads=grads)
+            return agent_state, (loss, pg_loss, v_loss, entropy_loss)
+        agent_state, (loss, pg_loss, v_loss, entropy_loss) = jax.lax.scan(
+            update_minibatch,
+            agent_state,
+            (
+                jnp.array(jnp.split(storage.obs, args.num_minibatches, axis=1)),
+                jnp.array(jnp.split(storage.actions, args.num_minibatches, axis=1)),
+                jnp.array(jnp.split(storage.logitss, args.num_minibatches, axis=1)),
+                jnp.array(jnp.split(storage.rewards, args.num_minibatches, axis=1)),
+                jnp.array(jnp.split(storage.dones, args.num_minibatches, axis=1)),
+                jnp.array(jnp.split(storage.firststeps, args.num_minibatches, axis=1)),
+            ),
         )
-        return agent_state, loss, pg_loss, v_loss, entropy_loss, approx_kl, key
+        return agent_state, loss, pg_loss, v_loss, entropy_loss, key
 
     multi_device_update = jax.pmap(
         single_device_update,
@@ -664,7 +694,7 @@ if __name__ == "__main__":
             sharded_storages.append(sharded_storage)
         rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
         training_time_start = time.time()
-        (agent_state, loss, pg_loss, v_loss, entropy_loss, approx_kl, learner_keys) = multi_device_update(
+        (agent_state, loss, pg_loss, v_loss, entropy_loss, learner_keys) = multi_device_update(
             agent_state,
             sharded_storages,
             learner_keys,
@@ -693,11 +723,10 @@ if __name__ == "__main__":
             writer.add_scalar(
                 "charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"][0].item(), global_step
             )
-            writer.add_scalar("losses/value_loss", v_loss[-1, -1, -1].item(), global_step)
-            writer.add_scalar("losses/policy_loss", pg_loss[-1, -1, -1].item(), global_step)
-            writer.add_scalar("losses/entropy", entropy_loss[-1, -1, -1].item(), global_step)
-            writer.add_scalar("losses/approx_kl", approx_kl[-1, -1, -1].item(), global_step)
-            writer.add_scalar("losses/loss", loss[-1, -1, -1].item(), global_step)
+            writer.add_scalar("losses/value_loss", v_loss[-1, -1].item(), global_step)
+            writer.add_scalar("losses/policy_loss", pg_loss[-1, -1].item(), global_step)
+            writer.add_scalar("losses/entropy", entropy_loss[-1, -1].item(), global_step)
+            writer.add_scalar("losses/loss", loss[-1, -1].item(), global_step)
         if update >= args.num_updates:
             break
 
