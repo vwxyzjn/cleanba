@@ -102,11 +102,9 @@ class Args:
     "whether to run the actor and learner concurrently"
 
     # runtime arguments to be filled in
-    async_batch_size: int = 0
     local_batch_size: int = 0
     local_minibatch_size: int = 0
     num_updates: int = 0
-    async_update: int = 0
     world_size: int = 0
     local_rank: int = 0
     num_envs: int = 0
@@ -123,13 +121,12 @@ ATARI_MAX_FRAMES = int(
 )  # 108000 is the max number of frames in an Atari game, divided by 4 to account for frame skipping
 
 
-def make_env(env_id, seed, num_envs, async_batch_size=1):
+def make_env(env_id, seed, num_envs):
     def thunk():
         envs = envpool.make(
             env_id,
             env_type="gym",
             num_envs=num_envs,
-            batch_size=async_batch_size,
             episodic_life=False,  # Machado et al. 2017 (Revisitng ALE: Eval protocols) p. 6
             repeat_action_probability=0.25,  # Machado et al. 2017 (Revisitng ALE: Eval protocols) p. 12
             noop_max=1,  # Machado et al. 2017 (Revisitng ALE: Eval protocols) p. 12 (no-op is deprecated in favor of sticky action, right?)
@@ -173,8 +170,8 @@ class ConvSequence(nn.Module):
 
 
 class Network(nn.Module):
-    channels: Sequence[int] = (64, 128, 128, 64)
-    hiddens: Sequence[int] = (512, 512)
+    channels: Sequence[int] = (16, 32, 32)
+    hiddens: Sequence[int] = (256,)
 
     @nn.compact
     def __call__(self, x):
@@ -237,7 +234,6 @@ def rollout(
         args.env_id,
         args.seed + jax.process_index() + device_thread_id,
         args.local_num_envs,
-        args.async_batch_size,
     )()
     len_actor_device_ids = len(args.actor_device_ids)
     global_step = 0
@@ -283,7 +279,7 @@ def rollout(
         storage_time = 0
         d2h_time = 0
         env_send_time = 0
-        num_steps_with_bootstrap = args.num_steps + 1 + int(len(storage) == 0)
+        num_steps_with_bootstrap = args.num_steps + 1 + int(len(storage) == 0) # num_steps + 1 to get the states for value bootstrapping.
         # NOTE: `update != 2` is actually IMPORTANT — it allows us to start running policy collection
         # concurrently with the learning process. It also ensures the actor's policy version is only 1 step
         # behind the learner's policy version
@@ -304,9 +300,7 @@ def rollout(
             actor_policy_version += 1
         params_queue_get_time.append(time.time() - params_queue_get_time_start)
         rollout_time_start = time.time()
-        for _ in range(
-            args.async_update, (num_steps_with_bootstrap) * args.async_update
-        ):  # num_steps + 1 to get the states for value bootstrapping.
+        for _ in range(1, num_steps_with_bootstrap):
             env_recv_time_start = time.time()
             next_obs, next_reward, next_done, info = envs.recv()
             env_recv_time += time.time() - env_recv_time_start
@@ -372,7 +366,7 @@ def rollout(
         rollout_queue_put_time.append(time.time() - rollout_queue_put_time_start)
 
         # move bootstrapping step to the beginning of the next update
-        storage = storage[-args.async_update :]
+        storage = storage[-1:]
 
         if update % args.log_frequency == 0:
             if device_thread_id == 0:
@@ -407,10 +401,8 @@ def rollout(
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
-    args.async_batch_size = args.local_num_envs  # local_num_envs must be equal to async_batch_size due to limitation of `rlax`
     args.local_batch_size = int(args.local_num_envs * args.num_steps * args.num_actor_threads * len(args.actor_device_ids))
     args.local_minibatch_size = int(args.local_batch_size // args.num_minibatches)
-    args.async_update = int(args.local_num_envs / args.async_batch_size)
     assert (
         args.local_num_envs % len(args.learner_device_ids) == 0
     ), "local_num_envs must be divisible by len(learner_device_ids)"
@@ -470,7 +462,7 @@ if __name__ == "__main__":
     learner_keys = jax.device_put_replicated(key, learner_devices)
 
     # env setup
-    envs = make_env(args.env_id, args.seed, args.local_num_envs, args.async_batch_size)()
+    envs = make_env(args.env_id, args.seed, args.local_num_envs)()
 
     def linear_schedule(count):
         # anneal learning rate linearly after one training iteration which contains
