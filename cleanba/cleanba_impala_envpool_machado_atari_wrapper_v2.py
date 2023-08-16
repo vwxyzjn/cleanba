@@ -115,7 +115,7 @@ ATARI_MAX_FRAMES = int(
 )  # 108000 is the max number of frames in an Atari game, divided by 4 to account for frame skipping
 
 
-def make_env(env_id, seed, num_envs):
+def make_env(env_id, seed, num_envs, async_batch_size=1):
     def thunk():
         envs = envpool.make(
             env_id,
