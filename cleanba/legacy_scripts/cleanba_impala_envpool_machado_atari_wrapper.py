@@ -70,7 +70,7 @@ def parse_args():
         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument("--gamma", type=float, default=0.99,
         help="the discount factor gamma")
-    parser.add_argument("--num-minibatches", type=int, default=2,
+    parser.add_argument("--num-minibatches", type=int, default=4,
         help="the number of mini-batches")
     parser.add_argument("--ent-coef", type=float, default=0.01,
         help="coefficient of the entropy")

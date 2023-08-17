@@ -23,7 +23,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import rlax
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
 from tensorboardX import SummaryWriter
@@ -60,23 +59,35 @@ def parse_args():
         help="the id of the environment")
     parser.add_argument("--total-timesteps", type=int, default=50000000,
         help="total timesteps of the experiments")
-    parser.add_argument("--learning-rate", type=float, default=0.0006,
+    parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
-    parser.add_argument("--local-num-envs", type=int, default=64,
+    parser.add_argument("--local-num-envs", type=int, default=60,
         help="the number of parallel game environments")
-    parser.add_argument("--num-steps", type=int, default=20,
+    parser.add_argument("--async-batch-size", type=int, default=20,
+        help="the envpool's batch size in the async mode")
+    parser.add_argument("--num-steps", type=int, default=128,
         help="the number of steps to run in each environment per policy rollout")
     parser.add_argument("--anneal-lr", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
         help="Toggle learning rate annealing for policy and value networks")
     parser.add_argument("--gamma", type=float, default=0.99,
         help="the discount factor gamma")
-    parser.add_argument("--num-minibatches", type=int, default=2,
+    parser.add_argument("--gae-lambda", type=float, default=0.95,
+        help="the lambda for the general advantage estimation")
+    parser.add_argument("--num-minibatches", type=int, default=4,
         help="the number of mini-batches")
-    parser.add_argument("--ent-coef", type=float, default=0.0006,
+    parser.add_argument("--num-grad-accum-steps", type=int, default=1,
+        help="the number of gradient accumulation steps")
+    parser.add_argument("--update-epochs", type=int, default=4,
+        help="the K epochs to update the policy")
+    parser.add_argument("--norm-adv", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="Toggles advantages normalization")
+    parser.add_argument("--clip-coef", type=float, default=0.1,
+        help="the surrogate clipping coefficient")
+    parser.add_argument("--ent-coef", type=float, default=0.01,
         help="coefficient of the entropy")
     parser.add_argument("--vf-coef", type=float, default=0.5,
         help="coefficient of the value function")
-    parser.add_argument("--max-grad-norm", type=float, default=40,
+    parser.add_argument("--max-grad-norm", type=float, default=0.5,
         help="the maximum norm for the gradient clipping")
     parser.add_argument("--target-kl", type=float, default=None,
         help="the target KL divergence threshold")
@@ -87,12 +98,13 @@ def parse_args():
         help="the device ids that learner workers will use")
     parser.add_argument("--distributed", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to use `jax.distirbuted`")
+    parser.add_argument("--concurrency", type=lambda x: bool(strtobool(x)), default=True, nargs="?", const=True,
+        help="whether to run the actor and learner concurrently")
     parser.add_argument("--profile", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to call block_until_ready() for profiling")
     parser.add_argument("--test-actor-learner-throughput", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True,
         help="whether to test actor-learner throughput by removing the actor-learner communication")
     args = parser.parse_args()
-    args.async_batch_size = args.local_num_envs # local_num_envs must be equal to async_batch_size due to limitation of `rlax`
     args.local_batch_size = int(args.local_num_envs * args.num_steps)
     args.local_minibatch_size = int(args.local_batch_size // args.num_minibatches)
     args.num_updates = args.total_timesteps // args.local_batch_size
@@ -166,11 +178,10 @@ class ConvSequence(nn.Module):
 
 
 class Network(nn.Module):
-    action_dim: int
     channelss: Sequence[int] = (16, 32, 32)
 
     @nn.compact
-    def __call__(self, x, prev_action, prev_reward):
+    def __call__(self, x):
         x = jnp.transpose(x, (0, 2, 3, 1))
         x = x / (255.0)
         for channels in self.channelss:
@@ -179,7 +190,6 @@ class Network(nn.Module):
         x = x.reshape((x.shape[0], -1))
         x = nn.Dense(256, kernel_init=orthogonal(np.sqrt(2)), bias_init=constant(0.0))(x)
         x = nn.relu(x)
-        x = jnp.concatenate([x, jax.nn.one_hot(prev_action, self.action_dim), prev_reward.reshape(-1, 1)], axis=-1)
         return x
 
 
@@ -205,54 +215,87 @@ class AgentParams:
 
 
 @partial(jax.jit, static_argnames=("action_dim"))
-def get_action(
+def get_action_and_value(
     params: flax.core.FrozenDict,
     next_obs: np.ndarray,
-    prev_action: np.ndarray,
-    prev_reward: np.ndarray,
     key: jax.random.PRNGKey,
     action_dim: int,
 ):
     next_obs = jnp.array(next_obs)
-    hidden = Network(action_dim).apply(params.network_params, next_obs, prev_action, prev_reward)
+    hidden = Network().apply(params.network_params, next_obs)
     logits = Actor(action_dim).apply(params.actor_params, hidden)
     # sample action: Gumbel-softmax trick
     # see https://stats.stackexchange.com/questions/359442/sampling-from-a-categorical-distribution
     key, subkey = jax.random.split(key)
     u = jax.random.uniform(subkey, shape=logits.shape)
     action = jnp.argmax(logits - jnp.log(-jnp.log(u)), axis=1)
-    return next_obs, action, logits, key
+    logprob = jax.nn.log_softmax(logits)[jnp.arange(action.shape[0]), action]
+    value = Critic().apply(params.critic_params, hidden)
+    return next_obs, action, logprob, value.squeeze(), key
 
 
 def prepare_data(
     obs: list,
     dones: list,
+    values: list,
     actions: list,
-    logitss: list,
-    firststeps: list,
+    logprobs: list,
     env_ids: list,
     rewards: list,
 ):
     obs = jnp.asarray(obs)
     dones = jnp.asarray(dones)
+    values = jnp.asarray(values)
     actions = jnp.asarray(actions)
-    logitss = jnp.asarray(logitss)
-    firststeps = jnp.asarray(firststeps)
+    logprobs = jnp.asarray(logprobs)
     env_ids = jnp.asarray(env_ids)
     rewards = jnp.asarray(rewards)
-    return obs, dones, actions, logitss, firststeps, env_ids, rewards
+
+    # TODO: in an unlikely event, one of the envs might have not stepped at all, which may results in unexpected behavior
+    T, B = env_ids.shape
+    index_ranges = jnp.arange(T * B, dtype=jnp.int32)
+    next_index_ranges = jnp.zeros_like(index_ranges, dtype=jnp.int32)
+    last_env_ids = jnp.zeros(args.local_num_envs, dtype=jnp.int32) - 1
+
+    def f(carry, x):
+        last_env_ids, next_index_ranges = carry
+        env_id, index_range = x
+        next_index_ranges = next_index_ranges.at[last_env_ids[env_id]].set(
+            jnp.where(last_env_ids[env_id] != -1, index_range, next_index_ranges[last_env_ids[env_id]])
+        )
+        last_env_ids = last_env_ids.at[env_id].set(index_range)
+        return (last_env_ids, next_index_ranges), None
+
+    (last_env_ids, next_index_ranges), _ = jax.lax.scan(
+        f,
+        (last_env_ids, next_index_ranges),
+        (env_ids.reshape(-1), index_ranges),
+    )
+
+    # rewards is off by one time step
+    rewards = rewards.reshape(-1)[next_index_ranges].reshape((args.num_steps) * args.async_update, args.async_batch_size)
+    advantages, returns, _, final_env_ids = compute_gae(env_ids, rewards, values, dones)
+    # b_inds = jnp.nonzero(final_env_ids.reshape(-1), size=(args.num_steps) * args.async_update * args.async_batch_size)[0] # useful for debugging
+    b_obs = obs.reshape((-1,) + obs.shape[2:])
+    b_actions = actions.reshape(-1)
+    b_logprobs = logprobs.reshape(-1)
+    b_advantages = advantages.reshape(-1)
+    b_returns = returns.reshape(-1)
+    return b_obs, b_actions, b_logprobs, b_advantages, b_returns
 
 
 @jax.jit
 def make_bulk_array(
     obs: list,
+    values: list,
     actions: list,
-    logitss: list,
+    logprobs: list,
 ):
     obs = jnp.asarray(obs)
+    values = jnp.asarray(values)
     actions = jnp.asarray(actions)
-    logitss = jnp.asarray(logitss)
-    return obs, actions, logitss
+    logprobs = jnp.asarray(logprobs)
+    return obs, values, actions, logprobs
 
 
 def rollout(
@@ -274,23 +317,12 @@ def rollout(
     returned_episode_returns = np.zeros((args.local_num_envs,), dtype=np.float32)
     episode_lengths = np.zeros((args.local_num_envs,), dtype=np.float32)
     returned_episode_lengths = np.zeros((args.local_num_envs,), dtype=np.float32)
-    prev_action = np.zeros((args.local_num_envs,), dtype=np.int32)
-    prev_reward = np.zeros((args.local_num_envs,), dtype=np.float32)
     envs.async_reset()
 
     params_queue_get_time = deque(maxlen=10)
     rollout_time = deque(maxlen=10)
     rollout_queue_put_time = deque(maxlen=10)
     actor_policy_version = 0
-    obs = []
-    dones = []
-    actions = []
-    logitss = []
-    env_ids = []
-    rewards = []
-    truncations = []
-    terminations = []
-    firststeps = []  # first step of an episode
     for update in range(1, args.num_updates + 2):
         # NOTE: This is a major difference from the sync version:
         # at the end of the rollout phase, the sync version will have the next observation
@@ -299,27 +331,36 @@ def rollout(
         # but note that the extra states are not used for the loss computation in the next iteration,
         # while the sync version will use the extra state for the loss computation.
         update_time_start = time.time()
+        obs = []
+        dones = []
+        actions = []
+        logprobs = []
+        values = []
+        env_ids = []
+        rewards = []
+        truncations = []
+        terminations = []
         env_recv_time = 0
         inference_time = 0
         storage_time = 0
         env_send_time = 0
 
-        init_action = prev_action.copy()
-        init_reward = prev_reward.copy()
-
-        num_steps_with_bootstrap = args.num_steps + 1 + int(len(obs) == 0)
         # NOTE: `update != 2` is actually IMPORTANT — it allows us to start running policy collection
         # concurrently with the learning process. It also ensures the actor's policy version is only 1 step
         # behind the learner's policy version
         params_queue_get_time_start = time.time()
-        if update != 2:
+        if not args.concurrency:
             params = params_queue.get()
             actor_policy_version += 1
+        else:
+            if update != 2:
+                params = params_queue.get()
+                actor_policy_version += 1
         params_queue_get_time.append(time.time() - params_queue_get_time_start)
         writer.add_scalar("stats/params_queue_get_time", np.mean(params_queue_get_time), global_step)
         rollout_time_start = time.time()
         for _ in range(
-            args.async_update, (num_steps_with_bootstrap) * args.async_update
+            args.async_update, (args.num_steps + 1) * args.async_update
         ):  # num_steps + 1 to get the states for value bootstrapping.
             env_recv_time_start = time.time()
             next_obs, next_reward, next_done, info = envs.recv()
@@ -328,18 +369,8 @@ def rollout(
             env_id = info["env_id"]
 
             inference_time_start = time.time()
-            next_obs, action, logits, key = get_action(
-                params,
-                next_obs,
-                prev_action[info["env_id"]],
-                prev_reward[info["env_id"]],
-                key,
-                envs.single_action_space.n,
-            )
+            next_obs, action, logprob, value, key = get_action_and_value(params, next_obs, key, envs.single_action_space.n)
             inference_time += time.time() - inference_time_start
-
-            prev_action[info["env_id"]] = action
-            prev_reward[info["env_id"]] = next_reward
 
             env_send_time_start = time.time()
             envs.send(np.array(action), env_id)
@@ -347,11 +378,11 @@ def rollout(
             storage_time_start = time.time()
             obs.append(next_obs)
             dones.append(next_done)
+            values.append(value)
             actions.append(action)
-            logitss.append(logits)
+            logprobs.append(logprob)
             env_ids.append(env_id)
             rewards.append(next_reward)
-            firststeps.append(info["elapsed_step"] == 0)
 
             # info["TimeLimit.truncated"] has a bug https://github.com/sail-sg/envpool/issues/239
             # so we use our own truncated flag
@@ -390,27 +421,25 @@ def rollout(
         # `make_bulk_array` is actually important. It accumulates the data from the lists
         # into single bulk arrays, which later makes transferring the data to the learner's
         # device slightly faster. See https://wandb.ai/costa-huang/cleanRL/reports/data-transfer-optimization--VmlldzozNjU5MTg1
-        c_obs, c_actions, c_logitss = obs, actions, logitss
         if args.learner_device_ids[0] != args.actor_device_ids[0]:
-            c_obs, c_actions, c_logitss = make_bulk_array(
+            obs, values, actions, logprobs = make_bulk_array(
                 obs,
+                values,
                 actions,
-                logitss,
+                logprobs,
             )
 
         payload = (
             global_step,
             actor_policy_version,
             update,
-            c_obs,
-            c_actions,
-            c_logitss,
-            firststeps,
+            obs,
+            values,
+            actions,
+            logprobs,
             dones,
             env_ids,
             rewards,
-            init_action,
-            init_reward,
             np.mean(params_queue_get_time),
         )
         if update == 1 or not args.test_actor_learner_throughput:
@@ -431,133 +460,169 @@ def rollout(
             global_step,
         )
 
-        obs = obs[-args.async_update :]
-        dones = dones[-args.async_update :]
-        actions = actions[-args.async_update :]
-        logitss = logitss[-args.async_update :]
-        env_ids = env_ids[-args.async_update :]
-        rewards = rewards[-args.async_update :]
-        truncations = truncations[-args.async_update :]
-        terminations = terminations[-args.async_update :]
-        firststeps = firststeps[-args.async_update :]
-
 
 @partial(jax.jit, static_argnames=("action_dim"))
 def get_action_and_value2(
     params: flax.core.FrozenDict,
     x: np.ndarray,
-    prev_action: np.ndarray,
-    prev_reward: np.ndarray,
+    action: np.ndarray,
     action_dim: int,
 ):
-    hidden = Network(action_dim).apply(params.network_params, x, prev_action, prev_reward)
-    raw_logits = Actor(action_dim).apply(params.actor_params, hidden)
+    hidden = Network().apply(params.network_params, x)
+    logits = Actor(action_dim).apply(params.actor_params, hidden)
+    logprob = jax.nn.log_softmax(logits)[jnp.arange(action.shape[0]), action]
+    logits = logits - jax.scipy.special.logsumexp(logits, axis=-1, keepdims=True)
+    logits = logits.clip(min=jnp.finfo(logits.dtype).min)
+    p_log_p = logits * jax.nn.softmax(logits)
+    entropy = -p_log_p.sum(-1)
     value = Critic().apply(params.critic_params, hidden).squeeze()
-    return raw_logits, value
+    return logprob, entropy, value
 
 
-def policy_gradient_loss(logits, *args):
-    """rlax.policy_gradient_loss, but with sum(loss) and [T, B, ...] inputs."""
-    mean_per_batch = jax.vmap(rlax.policy_gradient_loss, in_axes=1)(logits, *args)
-    total_loss_per_batch = mean_per_batch * logits.shape[0]
-    return jnp.sum(total_loss_per_batch)
+@jax.jit
+def compute_gae(
+    env_ids: np.ndarray,
+    rewards: np.ndarray,
+    values: np.ndarray,
+    dones: np.ndarray,
+):
+    dones = jnp.asarray(dones)
+    values = jnp.asarray(values)
+    env_ids = jnp.asarray(env_ids)
+    rewards = jnp.asarray(rewards)
 
+    _, B = env_ids.shape
+    final_env_id_checked = jnp.zeros(args.local_num_envs, jnp.int32) - 1
+    final_env_ids = jnp.zeros(B, jnp.int32)
+    advantages = jnp.zeros(B)
+    lastgaelam = jnp.zeros(args.local_num_envs)
+    lastdones = jnp.zeros(args.local_num_envs) + 1
+    lastvalues = jnp.zeros(args.local_num_envs)
 
-def entropy_loss_fn(logits, *args):
-    """rlax.entropy_loss, but with sum(loss) and [T, B, ...] inputs."""
-    mean_per_batch = jax.vmap(rlax.entropy_loss, in_axes=1)(logits, *args)
-    total_loss_per_batch = mean_per_batch * logits.shape[0]
-    return jnp.sum(total_loss_per_batch)
+    def compute_gae_once(carry, x):
+        lastvalues, lastdones, advantages, lastgaelam, final_env_ids, final_env_id_checked = carry
+        (
+            done,
+            value,
+            eid,
+            reward,
+        ) = x
+        nextnonterminal = 1.0 - lastdones[eid]
+        nextvalues = lastvalues[eid]
+        delta = jnp.where(final_env_id_checked[eid] == -1, 0, reward + args.gamma * nextvalues * nextnonterminal - value)
+        advantages = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam[eid]
+        final_env_ids = jnp.where(final_env_id_checked[eid] == 1, 1, 0)
+        final_env_id_checked = final_env_id_checked.at[eid].set(
+            jnp.where(final_env_id_checked[eid] == -1, 1, final_env_id_checked[eid])
+        )
 
+        # the last_ variables keeps track of the actual `num_steps`
+        lastgaelam = lastgaelam.at[eid].set(advantages)
+        lastdones = lastdones.at[eid].set(done)
+        lastvalues = lastvalues.at[eid].set(value)
+        return (lastvalues, lastdones, advantages, lastgaelam, final_env_ids, final_env_id_checked), (
+            advantages,
+            final_env_ids,
+        )
 
-def impala_loss(params, x, a, logitss, rewards, dones, firststeps, init_action, init_reward, action_dim):
-    discounts = (1.0 - dones) * args.gamma
-    mask = 1.0 - firststeps
-    prev_action = jnp.concatenate([init_action.reshape(1, -1), a[:-1]], axis=0)
-    prev_reward = jnp.concatenate([init_reward.reshape(1, -1), rewards[:-1]], axis=0)
-    policy_logits, newvalue = jax.vmap(get_action_and_value2, in_axes=(None, 0, 0, 0, None))(
-        params,
-        x,
-        prev_action,
-        prev_reward,
-        action_dim,
+    (_, _, _, _, final_env_ids, final_env_id_checked), (advantages, final_env_ids) = jax.lax.scan(
+        compute_gae_once,
+        (
+            lastvalues,
+            lastdones,
+            advantages,
+            lastgaelam,
+            final_env_ids,
+            final_env_id_checked,
+        ),
+        (
+            dones,
+            values,
+            env_ids,
+            rewards,
+        ),
+        reverse=True,
     )
-
-    v_t = newvalue[1:]
-    # Remove bootstrap timestep from non-timesteps.
-    v_tm1 = newvalue[:-1]
-    policy_logits = policy_logits[:-1]
-    logitss = logitss[:-1]
-    a = a[:-1]
-    mask = mask[:-1]
-    rewards = rewards[:-1]
-    discounts = discounts[:-1]
-
-    rhos = rlax.categorical_importance_sampling_ratios(policy_logits, logitss, a)
-    vtrace_td_error_and_advantage = jax.vmap(rlax.vtrace_td_error_and_advantage, in_axes=1, out_axes=1)
-
-    vtrace_returns = vtrace_td_error_and_advantage(v_tm1, v_t, rewards, discounts, rhos)
-    pg_advs = vtrace_returns.pg_advantage
-    pg_loss = policy_gradient_loss(policy_logits, a, pg_advs, mask)
-
-    baseline_loss = 0.5 * jnp.sum(jnp.square(vtrace_returns.errors) * mask)
-    ent_loss = entropy_loss_fn(policy_logits, mask)
-
-    total_loss = pg_loss
-    total_loss += args.vf_coef * baseline_loss
-    total_loss += args.ent_coef * ent_loss
-    return total_loss, (pg_loss, baseline_loss, ent_loss)
+    return advantages, advantages + values, final_env_id_checked, final_env_ids
 
 
-@partial(jax.jit, static_argnames=("action_dim"))
+def ppo_loss(params, x, a, logp, mb_advantages, mb_returns, action_dim):
+    newlogprob, entropy, newvalue = get_action_and_value2(params, x, a, action_dim)
+    logratio = newlogprob - logp
+    ratio = jnp.exp(logratio)
+    approx_kl = ((ratio - 1) - logratio).mean()
+
+    if args.norm_adv:
+        mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+
+    # Policy loss
+    pg_loss1 = -mb_advantages * ratio
+    pg_loss2 = -mb_advantages * jnp.clip(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+    pg_loss = jnp.maximum(pg_loss1, pg_loss2).mean()
+
+    # Value loss
+    v_loss = 0.5 * ((newvalue - mb_returns) ** 2).mean()
+
+    entropy_loss = entropy.mean()
+    loss = pg_loss - args.ent_coef * entropy_loss + v_loss * args.vf_coef
+    return loss, (pg_loss, v_loss, entropy_loss, jax.lax.stop_gradient(approx_kl))
+
+
+@partial(jax.jit, static_argnums=(6))
 def single_device_update(
     agent_state: TrainState,
-    obs,
-    actions,
-    logitss,
-    rewards,
-    dones,
-    firststeps,
-    init_action,
-    init_reward,
+    b_obs,
+    b_actions,
+    b_logprobs,
+    b_advantages,
+    b_returns,
     action_dim,
     key: jax.random.PRNGKey,
 ):
-    impala_loss_grad_fn = jax.value_and_grad(impala_loss, has_aux=True)
+    ppo_loss_grad_fn = jax.value_and_grad(ppo_loss, has_aux=True)
 
-    def update_minibatch(agent_state, minibatch):
-        mb_obs, mb_actions, mb_logitss, mb_rewards, mb_dones, mb_firststeps, init_action, init_reward = minibatch
-        (loss, (pg_loss, v_loss, entropy_loss)), grads = impala_loss_grad_fn(
-            agent_state.params,
-            mb_obs,
-            mb_actions,
-            mb_logitss,
-            mb_rewards,
-            mb_dones,
-            mb_firststeps,
-            init_action,
-            init_reward,
-            action_dim,
+    def update_epoch(carry, _):
+        agent_state, key = carry
+        key, subkey = jax.random.split(key)
+
+        # taken from: https://github.com/google/brax/blob/main/brax/training/agents/ppo/train.py
+        def convert_data(x: jnp.ndarray):
+            x = jax.random.permutation(subkey, x)
+            x = jnp.reshape(x, (args.num_minibatches * args.num_grad_accum_steps, -1) + x.shape[1:])
+            return x
+
+        def update_minibatch(agent_state, minibatch):
+            mb_obs, mb_actions, mb_logprobs, mb_advantages, mb_returns = minibatch
+            (loss, (pg_loss, v_loss, entropy_loss, approx_kl)), grads = ppo_loss_grad_fn(
+                agent_state.params,
+                mb_obs,
+                mb_actions,
+                mb_logprobs,
+                mb_advantages,
+                mb_returns,
+                action_dim,
+            )
+            grads = jax.lax.pmean(grads, axis_name="local_devices")
+            agent_state = agent_state.apply_gradients(grads=grads)
+            return agent_state, (loss, pg_loss, v_loss, entropy_loss, approx_kl, grads)
+
+        agent_state, (loss, pg_loss, v_loss, entropy_loss, approx_kl, grads) = jax.lax.scan(
+            update_minibatch,
+            agent_state,
+            (
+                convert_data(b_obs),
+                convert_data(b_actions),
+                convert_data(b_logprobs),
+                convert_data(b_advantages),
+                convert_data(b_returns),
+            ),
         )
-        grads = jax.lax.pmean(grads, axis_name="local_devices")
-        agent_state = agent_state.apply_gradients(grads=grads)
-        return agent_state, (loss, pg_loss, v_loss, entropy_loss)
+        return (agent_state, key), (loss, pg_loss, v_loss, entropy_loss, approx_kl, grads)
 
-    agent_state, (loss, pg_loss, v_loss, entropy_loss) = jax.lax.scan(
-        update_minibatch,
-        agent_state,
-        (
-            jnp.array(jnp.split(obs, args.num_minibatches, axis=1)),
-            jnp.array(jnp.split(actions, args.num_minibatches, axis=1)),
-            jnp.array(jnp.split(logitss, args.num_minibatches, axis=1)),
-            jnp.array(jnp.split(rewards, args.num_minibatches, axis=1)),
-            jnp.array(jnp.split(dones, args.num_minibatches, axis=1)),
-            jnp.array(jnp.split(firststeps, args.num_minibatches, axis=1)),
-            jnp.array(jnp.split(init_action, args.num_minibatches, axis=0)),
-            jnp.array(jnp.split(init_reward, args.num_minibatches, axis=0)),
-        ),
+    (agent_state, key), (loss, pg_loss, v_loss, entropy_loss, approx_kl, _) = jax.lax.scan(
+        update_epoch, (agent_state, key), (), length=args.update_epochs
     )
-    return agent_state, loss, pg_loss, v_loss, entropy_loss, key
+    return agent_state, loss, pg_loss, v_loss, entropy_loss, approx_kl, key
 
 
 if __name__ == "__main__":
@@ -620,32 +685,30 @@ if __name__ == "__main__":
 
     def linear_schedule(count):
         # anneal learning rate linearly after one training iteration which contains
-        # (args.num_minibatches) gradient updates
-        frac = 1.0 - (count // (args.num_minibatches)) / args.num_updates
+        # (args.num_minibatches * args.update_epochs) gradient updates
+        frac = 1.0 - (count // (args.num_minibatches * args.update_epochs)) / args.num_updates
         return args.learning_rate * frac
 
-    network = Network(action_dim=envs.single_action_space.n)
+    network = Network()
     actor = Actor(action_dim=envs.single_action_space.n)
     critic = Critic()
-    network_dummy_input = (
-        np.array([envs.single_observation_space.sample()]),
-        np.array([envs.single_action_space.sample()]),
-        np.array([envs.single_action_space.sample()]),
-    )
-    network_params = network.init(network_key, *network_dummy_input)
-    agent_state = TrainState.create(
-        apply_fn=None,
-        params=AgentParams(
-            network_params,
-            actor.init(actor_key, network.apply(network_params, *network_dummy_input)),
-            critic.init(critic_key, network.apply(network_params, *network_dummy_input)),
-        ),
-        tx=optax.chain(
+    network_params = network.init(network_key, np.array([envs.single_observation_space.sample()]))
+    optimizer = optax.chain(
             optax.clip_by_global_norm(args.max_grad_norm),
             optax.inject_hyperparams(optax.adam)(
                 learning_rate=linear_schedule if args.anneal_lr else args.learning_rate, eps=1e-5
             ),
+        )
+    if args.num_grad_accum_steps > 1:
+        optimizer = optax.MultiSteps(optimizer, every_k_schedule=args.num_grad_accum_steps)
+    agent_state = TrainState.create(
+        apply_fn=None,
+        params=AgentParams(
+            network_params,
+            actor.init(actor_key, network.apply(network_params, np.array([envs.single_observation_space.sample()]))),
+            critic.init(critic_key, network.apply(network_params, np.array([envs.single_observation_space.sample()]))),
         ),
+        tx=optimizer
     )
     agent_state = flax.jax_utils.replicate(agent_state, devices=learner_devices)
 
@@ -653,9 +716,9 @@ if __name__ == "__main__":
         single_device_update,
         axis_name="local_devices",
         devices=global_learner_decices,
-        in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, None, None),
-        out_axes=(0, 0, 0, 0, 0, None),
-        static_broadcasted_argnums=(9),
+        in_axes=(0, 0, 0, 0, 0, 0, None, None),
+        out_axes=(0, 0, 0, 0, 0, 0, None),
+        static_broadcasted_argnums=(6),
     )
 
     rollout_queue = queue.Queue(maxsize=1)
@@ -689,14 +752,12 @@ if __name__ == "__main__":
                 actor_policy_version,
                 update,
                 obs,
+                values,
                 actions,
-                logitss,
-                firststeps,
+                logprobs,
                 dones,
                 env_ids,
                 rewards,
-                init_action,
-                init_reward,
                 avg_params_queue_get_time,
             ) = rollout_queue.get()
             rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
@@ -708,38 +769,31 @@ if __name__ == "__main__":
             )
 
         data_transfer_time_start = time.time()
-        obs, dones, actions, logitss, firststeps, env_ids, rewards = prepare_data(
+        b_obs, b_actions, b_logprobs, b_advantages, b_returns = prepare_data(
             obs,
             dones,
+            values,
             actions,
-            logitss,
-            firststeps,
+            logprobs,
             env_ids,
             rewards,
         )
-
-        obs = jnp.array_split(obs, len(learner_devices), axis=1)
-        actions = jnp.array_split(actions, len(learner_devices), axis=1)
-        logitss = jnp.array_split(logitss, len(learner_devices), axis=1)
-        rewards = jnp.array_split(rewards, len(learner_devices), axis=1)
-        dones = jnp.array_split(dones, len(learner_devices), axis=1)
-        firststeps = jnp.array_split(firststeps, len(learner_devices), axis=1)
-        init_action = jnp.array_split(init_action, len(learner_devices), axis=0)
-        init_reward = jnp.array_split(init_reward, len(learner_devices), axis=0)
+        b_obs = jnp.array_split(b_obs, len(learner_devices))
+        b_actions = jnp.array_split(b_actions, len(learner_devices))
+        b_logprobs = jnp.array_split(b_logprobs, len(learner_devices))
+        b_advantages = jnp.array_split(b_advantages, len(learner_devices))
+        b_returns = jnp.array_split(b_returns, len(learner_devices))
         data_transfer_time.append(time.time() - data_transfer_time_start)
         writer.add_scalar("stats/data_transfer_time", np.mean(data_transfer_time), global_step)
 
         training_time_start = time.time()
-        (agent_state, loss, pg_loss, v_loss, entropy_loss, key) = multi_device_update(
+        (agent_state, loss, pg_loss, v_loss, entropy_loss, approx_kl, key) = multi_device_update(
             agent_state,
-            jax.device_put_sharded(obs, learner_devices),
-            jax.device_put_sharded(actions, learner_devices),
-            jax.device_put_sharded(logitss, learner_devices),
-            jax.device_put_sharded(rewards, learner_devices),
-            jax.device_put_sharded(dones, learner_devices),
-            jax.device_put_sharded(firststeps, learner_devices),
-            jax.device_put_sharded(init_action, learner_devices),
-            jax.device_put_sharded(init_reward, learner_devices),
+            jax.device_put_sharded(b_obs, learner_devices),
+            jax.device_put_sharded(b_actions, learner_devices),
+            jax.device_put_sharded(b_logprobs, learner_devices),
+            jax.device_put_sharded(b_advantages, learner_devices),
+            jax.device_put_sharded(b_returns, learner_devices),
             envs.single_action_space.n,
             key,
         )
@@ -755,21 +809,19 @@ if __name__ == "__main__":
             global_step,
             f"actor_policy_version={actor_policy_version}, actor_update={update}, learner_policy_version={learner_policy_version}, training time: {time.time() - training_time_start}s",
         )
-
+        if args.num_grad_accum_steps > 1:
+            cur_lr = agent_state.opt_state[2][1].hyperparams["learning_rate"][-1].item()
+        else:
+            cur_lr = agent_state.opt_state[1].hyperparams["learning_rate"][0].item()
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        writer.add_scalar("charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"][0].item(), global_step)
-        writer.add_scalar("losses/value_loss", v_loss[-1, -1].item(), global_step)
-        writer.add_scalar("losses/policy_loss", pg_loss[-1, -1].item(), global_step)
-        writer.add_scalar("losses/entropy", entropy_loss[-1, -1].item(), global_step)
-        writer.add_scalar("losses/loss", loss[-1, -1].item(), global_step)
+        writer.add_scalar("charts/learning_rate", cur_lr, global_step)
+        writer.add_scalar("losses/value_loss", v_loss[-1, -1, -1].item(), global_step)
+        writer.add_scalar("losses/policy_loss", pg_loss[-1, -1, -1].item(), global_step)
+        writer.add_scalar("losses/entropy", entropy_loss[-1, -1, -1].item(), global_step)
+        writer.add_scalar("losses/approx_kl", approx_kl[-1, -1, -1].item(), global_step)
+        writer.add_scalar("losses/loss", loss[-1, -1, -1].item(), global_step)
         if update >= args.num_updates:
             break
-
-        # print weights
-        # sum_params(agent_state.params)
-        # print("network_params", agent_state.params.network_params['params']["Dense_0"]["kernel"])
-        # print("actor_params", agent_state.params.actor_params['params']["Dense_0"]["kernel"])
-        # print("critic_params", agent_state.params.critic_params['params']["Dense_0"]["kernel"])
 
     if args.save_model and args.local_rank == 0:
         if args.distributed:
