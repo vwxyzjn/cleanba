@@ -57,9 +57,9 @@ class Args:
     "the id of the environment"
     total_timesteps: int = 50000000
     "total timesteps of the experiments"
-    learning_rate: float = 2.5e-4
+    learning_rate: float = 0.0006
     "the learning rate of the optimizer"
-    local_num_envs: int = 60
+    local_num_envs: int = 64
     "the number of parallel game environments"
     num_steps: int = 20
     "the number of steps to run in each environment per policy rollout"
@@ -67,15 +67,15 @@ class Args:
     "Toggle learning rate annealing for policy and value networks"
     gamma: float = 0.99
     "the discount factor gamma"
-    gae_lambda: float = 0.95
-    "the lambda for the general advantage estimation"
     num_minibatches: int = 4
     "the number of mini-batches"
+    gradient_accumulation_steps: int = 1
+    "the number of gradient accumulation steps before performing an optimization step"
     ent_coef: float = 0.01
     "coefficient of the entropy"
     vf_coef: float = 0.5
     "coefficient of the value function"
-    max_grad_norm: float = 0.5
+    max_grad_norm: float = 40.0
     "the maximum norm for the gradient clipping"
     channels: List[int] = field(default_factory=lambda: [16, 32, 32])
     "the channels of the CNN"
@@ -523,12 +523,15 @@ if __name__ == "__main__":
             actor.init(actor_key, network.apply(network_params, np.array([envs.single_observation_space.sample()]))),
             critic.init(critic_key, network.apply(network_params, np.array([envs.single_observation_space.sample()]))),
         ),
-        tx=optax.chain(
-            optax.clip_by_global_norm(args.max_grad_norm),
-            optax.inject_hyperparams(optax.adam)(
-                learning_rate=linear_schedule if args.anneal_lr else args.learning_rate, eps=1e-5
+        tx=optax.MultiSteps(
+            optax.chain(
+                optax.clip_by_global_norm(args.max_grad_norm),
+                optax.inject_hyperparams(rmsprop_pytorch_style)(
+                    learning_rate=linear_schedule if args.anneal_lr else args.learning_rate, eps=0.01, decay=0.99
+                ),
             ),
-        ),
+            every_k_schedule=args.gradient_accumulation_steps,
+        )
     )
     agent_state = flax.jax_utils.replicate(agent_state, devices=learner_devices)
     print(network.tabulate(network_key, np.array([envs.single_observation_space.sample()])))
@@ -541,7 +544,7 @@ if __name__ == "__main__":
         obs: np.ndarray,
     ):
         hidden = Network(args.channels, args.hiddens).apply(params.network_params, obs)
-        value = Critic().apply(params.critic_params, hidden).squeeze()
+        value = Critic().apply(params.critic_params, hidden).squeeze(-1)
         return value
 
     @jax.jit
@@ -551,7 +554,7 @@ if __name__ == "__main__":
     ):
         hidden = Network(args.channels, args.hiddens).apply(params.network_params, x)
         raw_logits = Actor(envs.single_action_space.n).apply(params.actor_params, hidden)
-        value = Critic().apply(params.critic_params, hidden).squeeze()
+        value = Critic().apply(params.critic_params, hidden).squeeze(-1)
         return raw_logits, value
 
     def policy_gradient_loss(logits, *args):
@@ -625,14 +628,18 @@ if __name__ == "__main__":
             update_minibatch,
             agent_state,
             (
-                jnp.array(jnp.split(storage.obs, args.num_minibatches, axis=1)),
-                jnp.array(jnp.split(storage.actions, args.num_minibatches, axis=1)),
-                jnp.array(jnp.split(storage.logitss, args.num_minibatches, axis=1)),
-                jnp.array(jnp.split(storage.rewards, args.num_minibatches, axis=1)),
-                jnp.array(jnp.split(storage.dones, args.num_minibatches, axis=1)),
-                jnp.array(jnp.split(storage.firststeps, args.num_minibatches, axis=1)),
+                jnp.array(jnp.split(storage.obs, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
+                jnp.array(jnp.split(storage.actions, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
+                jnp.array(jnp.split(storage.logitss, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
+                jnp.array(jnp.split(storage.rewards, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
+                jnp.array(jnp.split(storage.dones, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
+                jnp.array(jnp.split(storage.firststeps, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
             ),
         )
+        loss = jax.lax.pmean(loss, axis_name="local_devices").mean()
+        pg_loss = jax.lax.pmean(pg_loss, axis_name="local_devices").mean()
+        v_loss = jax.lax.pmean(v_loss, axis_name="local_devices").mean()
+        entropy_loss = jax.lax.pmean(entropy_loss, axis_name="local_devices").mean()
         return agent_state, loss, pg_loss, v_loss, entropy_loss, key
 
     multi_device_update = jax.pmap(
@@ -713,12 +720,12 @@ if __name__ == "__main__":
                 f"actor_policy_version={actor_policy_version}, actor_update={update}, learner_policy_version={learner_policy_version}, training time: {time.time() - training_time_start}s",
             )
             writer.add_scalar(
-                "charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"][0].item(), global_step
+                "charts/learning_rate", agent_state.opt_state[2][1].hyperparams["learning_rate"][-1].item(), global_step
             )
-            writer.add_scalar("losses/value_loss", v_loss[-1, -1].item(), global_step)
-            writer.add_scalar("losses/policy_loss", pg_loss[-1, -1].item(), global_step)
-            writer.add_scalar("losses/entropy", entropy_loss[-1, -1].item(), global_step)
-            writer.add_scalar("losses/loss", loss[-1, -1].item(), global_step)
+            writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+            writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
+            writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
+            writer.add_scalar("losses/loss", loss.item(), global_step)
         if update >= args.num_updates:
             break
 

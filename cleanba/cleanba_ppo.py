@@ -59,7 +59,7 @@ class Args:
     "total timesteps of the experiments"
     learning_rate: float = 2.5e-4
     "the learning rate of the optimizer"
-    local_num_envs: int = 60
+    local_num_envs: int = 64
     "the number of parallel game environments"
     num_steps: int = 128
     "the number of steps to run in each environment per policy rollout"
@@ -71,6 +71,8 @@ class Args:
     "the lambda for the general advantage estimation"
     num_minibatches: int = 4
     "the number of mini-batches"
+    gradient_accumulation_steps: int = 1
+    "the number of gradient accumulation steps before performing an optimization step"
     update_epochs: int = 4
     "the K epochs to update the policy"
     norm_adv: bool = True
@@ -481,12 +483,15 @@ if __name__ == "__main__":
             actor.init(actor_key, network.apply(network_params, np.array([envs.single_observation_space.sample()]))),
             critic.init(critic_key, network.apply(network_params, np.array([envs.single_observation_space.sample()]))),
         ),
-        tx=optax.chain(
-            optax.clip_by_global_norm(args.max_grad_norm),
-            optax.inject_hyperparams(optax.adam)(
-                learning_rate=linear_schedule if args.anneal_lr else args.learning_rate, eps=1e-5
+        tx=optax.MultiSteps(
+            optax.chain(
+                optax.clip_by_global_norm(args.max_grad_norm),
+                optax.inject_hyperparams(optax.adam)(
+                    learning_rate=linear_schedule if args.anneal_lr else args.learning_rate, eps=1e-5
+                ),
             ),
-        ),
+            every_k_schedule=args.gradient_accumulation_steps,
+        )
     )
     agent_state = flax.jax_utils.replicate(agent_state, devices=learner_devices)
     print(network.tabulate(network_key, np.array([envs.single_observation_space.sample()])))
@@ -499,7 +504,7 @@ if __name__ == "__main__":
         obs: np.ndarray,
     ):
         hidden = Network(args.channels, args.hiddens).apply(params.network_params, obs)
-        value = Critic().apply(params.critic_params, hidden).squeeze()
+        value = Critic().apply(params.critic_params, hidden).squeeze(-1)
         return value
 
     @jax.jit
@@ -515,7 +520,7 @@ if __name__ == "__main__":
         logits = logits.clip(min=jnp.finfo(logits.dtype).min)
         p_log_p = logits * jax.nn.softmax(logits)
         entropy = -p_log_p.sum(-1)
-        value = Critic().apply(params.critic_params, hidden).squeeze()
+        value = Critic().apply(params.critic_params, hidden).squeeze(-1)
         return logprob, entropy, value
 
     def ppo_loss(params, obs, actions, behavior_logprobs, firststeps, advantages, target_values):
@@ -590,12 +595,12 @@ if __name__ == "__main__":
                 update_minibatch,
                 agent_state,
                 (
-                    jnp.array(jnp.split(storage.obs, args.num_minibatches, axis=1)),
-                    jnp.array(jnp.split(storage.actions, args.num_minibatches, axis=1)),
-                    jnp.array(jnp.split(behavior_logprobs, args.num_minibatches, axis=1)),
-                    jnp.array(jnp.split(storage.firststeps, args.num_minibatches, axis=1)),
-                    jnp.array(jnp.split(advantages, args.num_minibatches, axis=1)),
-                    jnp.array(jnp.split(target_values, args.num_minibatches, axis=1)),
+                    jnp.array(jnp.split(storage.obs, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
+                    jnp.array(jnp.split(storage.actions, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
+                    jnp.array(jnp.split(behavior_logprobs, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
+                    jnp.array(jnp.split(storage.firststeps, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
+                    jnp.array(jnp.split(advantages, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
+                    jnp.array(jnp.split(target_values, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
                 ),
             )
             return (agent_state, key), (loss, pg_loss, v_loss, entropy_loss, approx_kl)
@@ -603,6 +608,11 @@ if __name__ == "__main__":
         (agent_state, key), (loss, pg_loss, v_loss, entropy_loss, approx_kl) = jax.lax.scan(
             update_epoch, (agent_state, key), (), length=args.update_epochs
         )
+        loss = jax.lax.pmean(loss, axis_name="local_devices").mean()
+        pg_loss = jax.lax.pmean(pg_loss, axis_name="local_devices").mean()
+        v_loss = jax.lax.pmean(v_loss, axis_name="local_devices").mean()
+        entropy_loss = jax.lax.pmean(entropy_loss, axis_name="local_devices").mean()
+        approx_kl = jax.lax.pmean(approx_kl, axis_name="local_devices").mean()
         return agent_state, loss, pg_loss, v_loss, entropy_loss, approx_kl, key
 
     multi_device_update = jax.pmap(
@@ -683,13 +693,13 @@ if __name__ == "__main__":
                 f"actor_policy_version={actor_policy_version}, actor_update={update}, learner_policy_version={learner_policy_version}, training time: {time.time() - training_time_start}s",
             )
             writer.add_scalar(
-                "charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"][0].item(), global_step
+                "charts/learning_rate", agent_state.opt_state[2][1].hyperparams["learning_rate"][-1].item(), global_step
             )
-            writer.add_scalar("losses/value_loss", v_loss[-1, -1, -1].item(), global_step)
-            writer.add_scalar("losses/policy_loss", pg_loss[-1, -1, -1].item(), global_step)
-            writer.add_scalar("losses/entropy", entropy_loss[-1, -1, -1].item(), global_step)
-            writer.add_scalar("losses/approx_kl", approx_kl[-1, -1, -1].item(), global_step)
-            writer.add_scalar("losses/loss", loss[-1, -1, -1].item(), global_step)
+            writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
+            writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
+            writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
+            writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
+            writer.add_scalar("losses/loss", loss.item(), global_step)
         if update >= args.num_updates:
             break
 
