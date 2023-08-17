@@ -90,7 +90,7 @@ CUDA_VISIBLE_DEVICES="4,5,6,7" SLURM_JOB_ID=26017 SLURM_STEP_NODELIST=localhost 
 # if you have slurm it's possible to run the following
 python -m cleanrl_utils.benchmark \
     --env-ids Breakout-v5 \
-    --command "poetry run python cleanrl/cleanba_ppo_large.py --distributed --learner-device-ids 1 2 3 --track --save-model --upload-model" \
+    --command "poetry run python cleanrl/cleanba_ppo.py --distributed --learner-device-ids 1 2 3 --track --save-model --upload-model" \
     --num-seeds 1 \
     --workers 1 \
     --slurm-gpus-per-task 4 \
