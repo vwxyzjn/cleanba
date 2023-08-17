@@ -535,8 +535,6 @@ if __name__ == "__main__":
         entropy = entropy[:-1]
         actions = actions[:-1]
         # mask = mask[:-1]
-        if args.norm_adv:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         logratio = newlogprob - behavior_logprobs
         ratio = jnp.exp(logratio)
@@ -577,6 +575,9 @@ if __name__ == "__main__":
         advantages, target_values = jax.vmap(gae_advantages, in_axes=1, out_axes=1)(
             storage.rewards[:-1], discounts[:-1], values
         )
+        # NOTE: notable implementation difference: we normalize advantage at the batch level
+        if args.norm_adv:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         def update_epoch(carry, _):
             agent_state, key = carry
