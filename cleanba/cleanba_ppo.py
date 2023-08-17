@@ -628,8 +628,8 @@ if __name__ == "__main__":
         devices=global_learner_decices,
     )
 
-    rollout_queue = queue.Queue(maxsize=args.num_actor_threads)
     params_queues = []
+    rollout_queues = []
     dummy_writer = SimpleNamespace()
     dummy_writer.add_scalar = lambda x, y, z: None
 
@@ -637,22 +637,22 @@ if __name__ == "__main__":
     for d_idx, d_id in enumerate(args.actor_device_ids):
         device_params = jax.device_put(unreplicated_params, local_devices[d_id])
         for thread_id in range(args.num_actor_threads):
-            params_queue = queue.Queue(maxsize=1)
-            params_queue.put(device_params)
+            params_queues.append(queue.Queue(maxsize=1))
+            rollout_queues.append(queue.Queue(maxsize=1))
+            params_queues[-1].put(device_params)
             threading.Thread(
                 target=rollout,
                 args=(
                     jax.device_put(key, local_devices[d_id]),
                     args,
-                    rollout_queue,
-                    params_queue,
+                    rollout_queues[-1],
+                    params_queues[-1],
                     writer if d_idx == 0 and thread_id == 0 else dummy_writer,
                     learner_devices,
                     d_idx * args.num_actor_threads + thread_id,
                     local_devices[d_id],
                 ),
             ).start()
-            params_queues.append(params_queue)
 
     rollout_queue_get_time = deque(maxlen=10)
     data_transfer_time = deque(maxlen=10)
@@ -661,16 +661,17 @@ if __name__ == "__main__":
         learner_policy_version += 1
         rollout_queue_get_time_start = time.time()
         sharded_storages = []
-        for _ in range(args.num_actor_threads * len(args.actor_device_ids)):
-            (
-                global_step,
-                actor_policy_version,
-                update,
-                sharded_storage,
-                avg_params_queue_get_time,
-                device_thread_id,
-            ) = rollout_queue.get()
-            sharded_storages.append(sharded_storage)
+        for d_idx, d_id in enumerate(args.actor_device_ids):
+            for thread_id in range(args.num_actor_threads):
+                (
+                    global_step,
+                    actor_policy_version,
+                    update,
+                    sharded_storage,
+                    avg_params_queue_get_time,
+                    device_thread_id,
+                ) = rollout_queues[d_idx * args.num_actor_threads + thread_id].get()
+                sharded_storages.append(sharded_storage)
         rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
         training_time_start = time.time()
         (agent_state, loss, pg_loss, v_loss, entropy_loss, approx_kl, learner_keys) = multi_device_update(
@@ -693,8 +694,8 @@ if __name__ == "__main__":
                 global_step,
             )
             writer.add_scalar("stats/training_time", time.time() - training_time_start, global_step)
-            writer.add_scalar("stats/rollout_queue_size", rollout_queue.qsize(), global_step)
-            writer.add_scalar("stats/params_queue_size", params_queue.qsize(), global_step)
+            writer.add_scalar("stats/rollout_queue_size", rollout_queues[-1].qsize(), global_step)
+            writer.add_scalar("stats/params_queue_size", params_queues[-1].qsize(), global_step)
             print(
                 global_step,
                 f"actor_policy_version={actor_policy_version}, actor_update={update}, learner_policy_version={learner_policy_version}, training time: {time.time() - training_time_start}s",
@@ -707,7 +708,7 @@ if __name__ == "__main__":
             writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
             writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
             writer.add_scalar("losses/loss", loss.item(), global_step)
-        if update >= args.num_updates:
+        if learner_policy_version >= args.num_updates:
             break
 
     if args.save_model and args.local_rank == 0:
