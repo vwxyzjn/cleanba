@@ -7,11 +7,12 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import List, NamedTuple, Optional, Sequence, Tuple
+from typing import List, NamedTuple, Optional, Sequence
 
 import envpool
 import flax
 import flax.linen as nn
+from rich.pretty import pprint
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -61,6 +62,8 @@ class Args:
     "the learning rate of the optimizer"
     local_num_envs: int = 64
     "the number of parallel game environments"
+    num_actor_threads: int = 2
+    "the number of actor threads to use"
     num_steps: int = 20
     "the number of steps to run in each environment per policy rollout"
     anneal_lr: bool = True
@@ -84,8 +87,6 @@ class Args:
 
     actor_device_ids: List[int] = field(default_factory=lambda: [0])
     "the device ids that actor workers will use"
-    num_actor_threads: int = 2
-    "the number of actor threads to use"
     learner_device_ids: List[int] = field(default_factory=lambda: [0])
     "the device ids that learner workers will use"
     distributed: bool = False
@@ -476,6 +477,7 @@ if __name__ == "__main__":
     args.global_learner_decices = [str(item) for item in global_learner_decices]
     args.actor_devices = [str(item) for item in actor_devices]
     args.learner_devices = [str(item) for item in learner_devices]
+    pprint(args)
 
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{uuid.uuid4()}"
     if args.track and args.local_rank == 0:
@@ -537,15 +539,6 @@ if __name__ == "__main__":
     print(network.tabulate(network_key, np.array([envs.single_observation_space.sample()])))
     print(actor.tabulate(actor_key, network.apply(network_params, np.array([envs.single_observation_space.sample()]))))
     print(critic.tabulate(critic_key, network.apply(network_params, np.array([envs.single_observation_space.sample()]))))
-
-    @jax.jit
-    def get_value(
-        params: flax.core.FrozenDict,
-        obs: np.ndarray,
-    ):
-        hidden = Network(args.channels, args.hiddens).apply(params.network_params, obs)
-        value = Critic().apply(params.critic_params, hidden).squeeze(-1)
-        return value
 
     @jax.jit
     def get_logits_and_value(

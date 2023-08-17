@@ -12,6 +12,7 @@ from typing import List, NamedTuple, Optional, Sequence, Tuple
 import envpool
 import flax
 import flax.linen as nn
+from rich.pretty import pprint
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -61,6 +62,8 @@ class Args:
     "the learning rate of the optimizer"
     local_num_envs: int = 64
     "the number of parallel game environments"
+    num_actor_threads: int = 2
+    "the number of actor threads to use"
     num_steps: int = 128
     "the number of steps to run in each environment per policy rollout"
     anneal_lr: bool = True
@@ -85,8 +88,6 @@ class Args:
     "coefficient of the value function"
     max_grad_norm: float = 0.5
     "the maximum norm for the gradient clipping"
-    target_kl: float = None
-    "the target KL divergence threshold"
     channels: List[int] = field(default_factory=lambda: [16, 32, 32])
     "the channels of the CNN"
     hiddens: List[int] = field(default_factory=lambda: [256])
@@ -94,8 +95,6 @@ class Args:
 
     actor_device_ids: List[int] = field(default_factory=lambda: [0])
     "the device ids that actor workers will use"
-    num_actor_threads: int = 2
-    "the number of actor threads to use"
     learner_device_ids: List[int] = field(default_factory=lambda: [0])
     "the device ids that learner workers will use"
     distributed: bool = False
@@ -436,6 +435,7 @@ if __name__ == "__main__":
     args.global_learner_decices = [str(item) for item in global_learner_decices]
     args.actor_devices = [str(item) for item in actor_devices]
     args.learner_devices = [str(item) for item in learner_devices]
+    pprint(args)
 
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{uuid.uuid4()}"
     if args.track and args.local_rank == 0:
