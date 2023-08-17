@@ -62,7 +62,7 @@ def parse_args():
         help="total timesteps of the experiments")
     parser.add_argument("--learning-rate", type=float, default=2.5e-4,
         help="the learning rate of the optimizer")
-    parser.add_argument("--local-num-envs", type=int, default=60,
+    parser.add_argument("--local-num-envs", type=int, default=64,
         help="the number of parallel game environments")
     parser.add_argument("--num-steps", type=int, default=20,
         help="the number of steps to run in each environment per policy rollout")

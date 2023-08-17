@@ -6,8 +6,8 @@ import uuid
 from collections import deque
 from distutils.util import strtobool
 from functools import partial
-from typing import Sequence
 from types import SimpleNamespace
+from typing import Sequence
 
 os.environ[
     "XLA_PYTHON_CLIENT_MEM_FRACTION"
@@ -228,7 +228,8 @@ def rollout(
     device_thread_id,
     actor_device,
 ):
-    envs = make_env(args.env_id,
+    envs = make_env(
+        args.env_id,
         args.seed + jax.process_index() + device_thread_id,
         args.local_num_envs,
         args.async_batch_size,
@@ -258,6 +259,7 @@ def rollout(
     truncations = []
     terminations = []
     firststeps = []  # first step of an episode
+
     def prepare_data(
         obs: list,
         dones: list,
@@ -275,6 +277,7 @@ def rollout(
         env_ids = jnp.array_split(jnp.asarray(env_ids), len(learner_devices), axis=1)
         rewards = jnp.array_split(jnp.asarray(rewards), len(learner_devices), axis=1)
         return obs, dones, actions, logitss, firststeps, env_ids, rewards
+
     prepare_data = jax.jit(prepare_data, device=actor_device)
     for update in range(1, args.num_updates + 2):
         update_time_start = time.time()
@@ -295,7 +298,7 @@ def rollout(
             # the jitted `get_action` function that hangs until the params are ready.
             # This blocks the `get_action` function in other actor threads.
             # See https://imgur.com/a/5UeRaUH for a visual explanation.
-            params.network_params['params']["Dense_0"]["kernel"].block_until_ready()
+            params.network_params["params"]["Dense_0"]["kernel"].block_until_ready()
             actor_policy_version += 1
         params_queue_get_time.append(time.time() - params_queue_get_time_start)
         writer.add_scalar("stats/params_queue_get_time", np.mean(params_queue_get_time), global_step)
@@ -351,7 +354,9 @@ def rollout(
         writer.add_scalar("charts/avg_episodic_return", avg_episodic_return, global_step)
         writer.add_scalar("charts/avg_episodic_length", np.mean(returned_episode_lengths), global_step)
         if device_thread_id == 0:
-            print(f"global_step={global_step}, avg_episodic_return={avg_episodic_return}, rollout_time={np.mean(rollout_time)}")
+            print(
+                f"global_step={global_step}, avg_episodic_return={avg_episodic_return}, rollout_time={np.mean(rollout_time)}"
+            )
             print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
@@ -403,15 +408,15 @@ def rollout(
             global_step,
         )
 
-        obs = obs[-args.async_update:]
-        dones = dones[-args.async_update:]
-        actions = actions[-args.async_update:]
-        logitss = logitss[-args.async_update:]
-        env_ids = env_ids[-args.async_update:]
-        rewards = rewards[-args.async_update:]
-        truncations = truncations[-args.async_update:]
-        terminations = terminations[-args.async_update:]
-        firststeps = firststeps[-args.async_update:]
+        obs = obs[-args.async_update :]
+        dones = dones[-args.async_update :]
+        actions = actions[-args.async_update :]
+        logitss = logitss[-args.async_update :]
+        env_ids = env_ids[-args.async_update :]
+        rewards = rewards[-args.async_update :]
+        truncations = truncations[-args.async_update :]
+        terminations = terminations[-args.async_update :]
+        firststeps = firststeps[-args.async_update :]
 
 
 @partial(jax.jit, static_argnames=("action_dim"))
@@ -619,10 +624,11 @@ if __name__ == "__main__":
     params_queues = []
 
     import multiprocessing as mp
+
     num_cpus = mp.cpu_count()
     fair_num_cpus = num_cpus // len(args.actor_device_ids)
     dummy_writer = SimpleNamespace()
-    dummy_writer.add_scalar = lambda x,y,z: None
+    dummy_writer.add_scalar = lambda x, y, z: None
 
     unreplicated_params = flax.jax_utils.unreplicate(agent_state.params)
     for d_idx, d_id in enumerate(args.actor_device_ids):
@@ -682,7 +688,11 @@ if __name__ == "__main__":
             rewards.append(t_rewards)
         rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
         writer.add_scalar("stats/rollout_queue_get_time", np.mean(rollout_queue_get_time), global_step)
-        writer.add_scalar("stats/rollout_params_queue_get_time_diff", np.mean(rollout_queue_get_time) - avg_params_queue_get_time, global_step)
+        writer.add_scalar(
+            "stats/rollout_params_queue_get_time_diff",
+            np.mean(rollout_queue_get_time) - avg_params_queue_get_time,
+            global_step,
+        )
 
         training_time_start = time.time()
         (agent_state, loss, pg_loss, v_loss, entropy_loss, key) = multi_device_update(
@@ -712,7 +722,9 @@ if __name__ == "__main__":
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if learner_policy_version % 50 == 0:
-            writer.add_scalar("charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"][0].item(), global_step)
+            writer.add_scalar(
+                "charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"][0].item(), global_step
+            )
             writer.add_scalar("losses/value_loss", v_loss[-1, -1].item(), global_step)
             writer.add_scalar("losses/policy_loss", pg_loss[-1, -1].item(), global_step)
             writer.add_scalar("losses/entropy", entropy_loss[-1, -1].item(), global_step)

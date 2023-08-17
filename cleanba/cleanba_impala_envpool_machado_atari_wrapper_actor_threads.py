@@ -6,8 +6,8 @@ import uuid
 from collections import deque
 from distutils.util import strtobool
 from functools import partial
-from typing import Sequence
 from types import SimpleNamespace
+from typing import Sequence
 
 os.environ[
     "XLA_PYTHON_CLIENT_MEM_FRACTION"
@@ -246,7 +246,8 @@ def rollout(
     learner_devices,
     device_thread_id,
 ):
-    envs = make_env(args.env_id,
+    envs = make_env(
+        args.env_id,
         args.seed + jax.process_index() + device_thread_id,
         args.local_num_envs,
         args.async_batch_size,
@@ -391,15 +392,15 @@ def rollout(
             global_step,
         )
 
-        obs = obs[-args.async_update:]
-        dones = dones[-args.async_update:]
-        actions = actions[-args.async_update:]
-        logitss = logitss[-args.async_update:]
-        env_ids = env_ids[-args.async_update:]
-        rewards = rewards[-args.async_update:]
-        truncations = truncations[-args.async_update:]
-        terminations = terminations[-args.async_update:]
-        firststeps = firststeps[-args.async_update:]
+        obs = obs[-args.async_update :]
+        dones = dones[-args.async_update :]
+        actions = actions[-args.async_update :]
+        logitss = logitss[-args.async_update :]
+        env_ids = env_ids[-args.async_update :]
+        rewards = rewards[-args.async_update :]
+        truncations = truncations[-args.async_update :]
+        terminations = terminations[-args.async_update :]
+        firststeps = firststeps[-args.async_update :]
 
 
 @partial(jax.jit, static_argnames=("action_dim"))
@@ -431,6 +432,7 @@ def entropy_loss_fn(logits, *args):
 def impala_loss(params, x, a, logitss, rewards, dones, firststeps, action_dim):
     discounts = (1.0 - dones) * args.gamma
     mask = 1.0 - firststeps
+    breakpoint()
     policy_logits, newvalue = jax.vmap(get_action_and_value2, in_axes=(None, 0, None))(params, x, action_dim)
 
     v_t = newvalue[1:]
@@ -601,10 +603,11 @@ if __name__ == "__main__":
     params_queues = []
 
     import multiprocessing as mp
+
     num_cpus = mp.cpu_count()
     fair_num_cpus = num_cpus // len(args.actor_device_ids)
     dummy_writer = SimpleNamespace()
-    dummy_writer.add_scalar = lambda x,y,z: None
+    dummy_writer.add_scalar = lambda x, y, z: None
 
     for d_idx, d_id in enumerate(args.actor_device_ids):
         device_params = jax.device_put(flax.jax_utils.unreplicate(agent_state.params), local_devices[d_id])
@@ -662,8 +665,11 @@ if __name__ == "__main__":
             rewards.append(t_rewards)
         rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
         writer.add_scalar("stats/rollout_queue_get_time", np.mean(rollout_queue_get_time), global_step)
-        writer.add_scalar("stats/rollout_params_queue_get_time_diff", np.mean(rollout_queue_get_time) - avg_params_queue_get_time, global_step)
-
+        writer.add_scalar(
+            "stats/rollout_params_queue_get_time_diff",
+            np.mean(rollout_queue_get_time) - avg_params_queue_get_time,
+            global_step,
+        )
 
         data_transfer_time_start = time.time()
         obs, dones, actions, logitss, firststeps, env_ids, rewards = prepare_data(
@@ -712,7 +718,9 @@ if __name__ == "__main__":
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if learner_policy_version % 50 == 0:
-            writer.add_scalar("charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"][0].item(), global_step)
+            writer.add_scalar(
+                "charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"][0].item(), global_step
+            )
             writer.add_scalar("losses/value_loss", v_loss[-1, -1].item(), global_step)
             writer.add_scalar("losses/policy_loss", pg_loss[-1, -1].item(), global_step)
             writer.add_scalar("losses/entropy", entropy_loss[-1, -1].item(), global_step)

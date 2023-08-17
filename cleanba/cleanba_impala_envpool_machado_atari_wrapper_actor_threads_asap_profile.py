@@ -7,8 +7,8 @@ import uuid
 from collections import deque
 from distutils.util import strtobool
 from functools import partial
-from typing import Sequence
 from types import SimpleNamespace
+from typing import Sequence
 
 os.environ[
     "XLA_PYTHON_CLIENT_MEM_FRACTION"
@@ -230,7 +230,8 @@ def rollout(
     device_thread_id,
     actor_device,
 ):
-    envs = make_env(args.env_id,
+    envs = make_env(
+        args.env_id,
         args.seed + jax.process_index() + device_thread_id,
         args.local_num_envs,
         args.async_batch_size,
@@ -261,6 +262,7 @@ def rollout(
     truncations = []
     terminations = []
     firststeps = []  # first step of an episode
+
     def prepare_data(
         obs: list,
         dones: list,
@@ -278,11 +280,11 @@ def rollout(
         env_ids = jnp.array_split(jnp.asarray(env_ids), len(learner_devices), axis=1)
         rewards = jnp.array_split(jnp.asarray(rewards), len(learner_devices), axis=1)
         return obs, dones, actions, logitss, firststeps, env_ids, rewards
+
     prepare_data = jax.jit(prepare_data, device=actor_device)
     for update in range(1, args.num_updates + 2):
         if update == 4 and device_thread_id == 0:
             jax.profiler.start_trace(f"runs/{run_name}/profile", create_perfetto_trace=True)
-            pass
 
         # print("update", update, "agent_state", agent_state_store[0].step)
         # NOTE: This is a major difference from the sync version:
@@ -365,7 +367,9 @@ def rollout(
         writer.add_scalar("charts/avg_episodic_return", avg_episodic_return, global_step)
         writer.add_scalar("charts/avg_episodic_length", np.mean(returned_episode_lengths), global_step)
         if device_thread_id == 0:
-            print(f"global_step={global_step}, avg_episodic_return={avg_episodic_return}, rollout_time={np.mean(rollout_time)}")
+            print(
+                f"global_step={global_step}, avg_episodic_return={avg_episodic_return}, rollout_time={np.mean(rollout_time)}"
+            )
             print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
@@ -417,15 +421,15 @@ def rollout(
             global_step,
         )
 
-        obs = obs[-args.async_update:]
-        dones = dones[-args.async_update:]
-        actions = actions[-args.async_update:]
-        logitss = logitss[-args.async_update:]
-        env_ids = env_ids[-args.async_update:]
-        rewards = rewards[-args.async_update:]
-        truncations = truncations[-args.async_update:]
-        terminations = terminations[-args.async_update:]
-        firststeps = firststeps[-args.async_update:]
+        obs = obs[-args.async_update :]
+        dones = dones[-args.async_update :]
+        actions = actions[-args.async_update :]
+        logitss = logitss[-args.async_update :]
+        env_ids = env_ids[-args.async_update :]
+        rewards = rewards[-args.async_update :]
+        truncations = truncations[-args.async_update :]
+        terminations = terminations[-args.async_update :]
+        firststeps = firststeps[-args.async_update :]
         print("update", update)
         if update == 15:
             if device_thread_id == 0:
@@ -549,7 +553,9 @@ if __name__ == "__main__":
     args.batch_size = args.local_batch_size * args.world_size
     args.minibatch_size = args.local_minibatch_size * args.world_size
     args.num_gradient_updates = args.total_timesteps // args.local_batch_size
-    args.num_updates = args.total_timesteps // int(args.local_batch_size * args.num_actor_threads * len(args.actor_device_ids) * args.world_size)
+    args.num_updates = args.total_timesteps // int(
+        args.local_batch_size * args.num_actor_threads * len(args.actor_device_ids) * args.world_size
+    )
     args.async_update = int(args.local_num_envs / args.async_batch_size)
     local_devices = jax.local_devices()
     global_devices = jax.devices()
@@ -635,10 +641,11 @@ if __name__ == "__main__":
     params_queues = []
 
     import multiprocessing as mp
+
     num_cpus = mp.cpu_count()
     fair_num_cpus = num_cpus // len(args.actor_device_ids)
     dummy_writer = SimpleNamespace()
-    dummy_writer.add_scalar = lambda x,y,z: None
+    dummy_writer.add_scalar = lambda x, y, z: None
 
     for d_idx, d_id in enumerate(args.actor_device_ids):
         device_params = jax.device_put(flax.jax_utils.unreplicate(agent_state.params), local_devices[d_id])
@@ -680,10 +687,17 @@ if __name__ == "__main__":
         ) = rollout_queue.get()
         rollout_queue_get_time.append(time.time() - rollout_queue_get_time_start)
         writer.add_scalar("stats/rollout_queue_get_time", np.mean(rollout_queue_get_time), global_step)
-        writer.add_scalar("stats/rollout_params_queue_get_time_diff", np.mean(rollout_queue_get_time) - avg_params_queue_get_time, global_step)
+        writer.add_scalar(
+            "stats/rollout_params_queue_get_time_diff",
+            np.mean(rollout_queue_get_time) - avg_params_queue_get_time,
+            global_step,
+        )
         data_transfer_time_start = time.time()
 
-        writer.add_scalar(f"stats/actor_policy_version_lag/{device_thread_id}", learner_policy_version * args.num_minibatches - actor_policy_version[0].item())
+        writer.add_scalar(
+            f"stats/actor_policy_version_lag/{device_thread_id}",
+            learner_policy_version * args.num_minibatches - actor_policy_version[0].item(),
+        )
         data_transfer_time.append(time.time() - data_transfer_time_start)
         writer.add_scalar("stats/data_transfer_time", np.mean(data_transfer_time), global_step)
 
@@ -714,7 +728,6 @@ if __name__ == "__main__":
         )
         writer.add_scalar("stats/learner_policy_version", learner_policy_version * args.num_minibatches, global_step)
 
-
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         writer.add_scalar("charts/learning_rate", agent_state.opt_state[1].hyperparams["learning_rate"][0].item(), global_step)
         writer.add_scalar("losses/value_loss", v_loss[-1, -1].item(), global_step)
@@ -732,7 +745,6 @@ if __name__ == "__main__":
 
         if update == 15:
             break
-
 
     envs.close()
     writer.close()
@@ -847,17 +859,28 @@ Please open a new tab and open
 {content}
     """
     time.sleep(20)
+
     def find_perfetto_trace_json_gz(path):
         for root, dirs, files in os.walk(path):
             for file in files:
                 if file == "perfetto_trace.json.gz":
                     return os.path.join(root, file)
         return None
+
     perfetto_trace_json_gz_path = find_perfetto_trace_json_gz(f"runs/{run_name}/profile")
     if perfetto_trace_json_gz_path is not None and args.track:
-        wandb.save(perfetto_trace_json_gz_path, base_path=perfetto_trace_json_gz_path[:-len("perfetto_trace.json.gz")])
+        wandb.save(perfetto_trace_json_gz_path, base_path=perfetto_trace_json_gz_path[: -len("perfetto_trace.json.gz")])
         with open(f"runs/{run_name}/perfetto.html", "w") as f:
-            f.write(HTML_TEMPLATE.replace(r"{perfetto_trace_json_gz_path}", f"https://localhost:27658/files/{wandb.run.path}/perfetto_trace.json.gz"))
+            f.write(
+                HTML_TEMPLATE.replace(
+                    r"{perfetto_trace_json_gz_path}", f"https://localhost:27658/files/{wandb.run.path}/perfetto_trace.json.gz"
+                )
+            )
         wandb.save(f"runs/{run_name}/perfetto.html", base_path=f"runs/{run_name}/")
-        wandb.log({"perfetto_trace": wandb.Html(HTML_TEMPLATE2.replace(r"{content}", f"https://api.wandb.ai/files/{wandb.run.path}/perfetto.html"))})
-
+        wandb.log(
+            {
+                "perfetto_trace": wandb.Html(
+                    HTML_TEMPLATE2.replace(r"{content}", f"https://api.wandb.ai/files/{wandb.run.path}/perfetto.html")
+                )
+            }
+        )
