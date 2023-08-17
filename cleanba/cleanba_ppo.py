@@ -12,7 +12,6 @@ from typing import List, NamedTuple, Optional, Sequence, Tuple
 import envpool
 import flax
 import flax.linen as nn
-from rich.pretty import pprint
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -21,14 +20,16 @@ import rlax
 import tyro
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
+from rich.pretty import pprint
 from tensorboardX import SummaryWriter
 
 # Fix weird OOM https://github.com/google/jax/discussions/6332#discussioncomment-1279991
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.6"  
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.6"
 os.environ["XLA_FLAGS"] = "--xla_cpu_multi_thread_eigen=false " "intra_op_parallelism_threads=1"
 # Fix CUDNN non-determinisim; https://github.com/google/jax/issues/4823#issuecomment-952835771
-os.environ ["TF_XLA_FLAGS"] = "--xla_gpu_autotune_level=2 --xla_gpu_deterministic_reductions"
-os.environ ["TF_CUDNN DETERMINISTIC" ] = "1"
+os.environ["TF_XLA_FLAGS"] = "--xla_gpu_autotune_level=2 --xla_gpu_deterministic_reductions"
+os.environ["TF_CUDNN DETERMINISTIC"] = "1"
+
 
 @dataclass
 class Args:
@@ -280,7 +281,9 @@ def rollout(
         storage_time = 0
         d2h_time = 0
         env_send_time = 0
-        num_steps_with_bootstrap = args.num_steps + 1 + int(len(storage) == 0) # num_steps + 1 to get the states for value bootstrapping.
+        num_steps_with_bootstrap = (
+            args.num_steps + 1 + int(len(storage) == 0)
+        )  # num_steps + 1 to get the states for value bootstrapping.
         # NOTE: `update != 2` is actually IMPORTANT — it allows us to start running policy collection
         # concurrently with the learning process. It also ensures the actor's policy version is only 1 step
         # behind the learner's policy version
@@ -491,7 +494,7 @@ if __name__ == "__main__":
                 ),
             ),
             every_k_schedule=args.gradient_accumulation_steps,
-        )
+        ),
     )
     agent_state = flax.jax_utils.replicate(agent_state, devices=learner_devices)
     print(network.tabulate(network_key, np.array([envs.single_observation_space.sample()])))
@@ -571,7 +574,10 @@ if __name__ == "__main__":
             target_values = jax.lax.stop_gradient(target_values)
             return advantages, target_values
 
-        advantages, target_values = jax.vmap(gae_advantages, in_axes=1, out_axes=1)(storage.rewards[:-1], discounts[:-1], values)
+        advantages, target_values = jax.vmap(gae_advantages, in_axes=1, out_axes=1)(
+            storage.rewards[:-1], discounts[:-1], values
+        )
+
         def update_epoch(carry, _):
             agent_state, key = carry
             key, subkey = jax.random.split(key)

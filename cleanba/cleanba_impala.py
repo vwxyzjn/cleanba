@@ -12,7 +12,6 @@ from typing import List, NamedTuple, Optional, Sequence
 import envpool
 import flax
 import flax.linen as nn
-from rich.pretty import pprint
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -21,14 +20,16 @@ import rlax
 import tyro
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
+from rich.pretty import pprint
 from tensorboardX import SummaryWriter
 
 # Fix weird OOM https://github.com/google/jax/discussions/6332#discussioncomment-1279991
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.6"  
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.6"
 os.environ["XLA_FLAGS"] = "--xla_cpu_multi_thread_eigen=false " "intra_op_parallelism_threads=1"
 # Fix CUDNN non-determinisim; https://github.com/google/jax/issues/4823#issuecomment-952835771
-os.environ ["TF_XLA_FLAGS"] = "--xla_gpu_autotune_level=2 --xla_gpu_deterministic_reductions"
-os.environ ["TF_CUDNN DETERMINISTIC" ] = "1"
+os.environ["TF_XLA_FLAGS"] = "--xla_gpu_autotune_level=2 --xla_gpu_deterministic_reductions"
+os.environ["TF_CUDNN DETERMINISTIC"] = "1"
+
 
 @dataclass
 class Args:
@@ -142,11 +143,11 @@ def make_env(env_id, seed, num_envs):
 # fmt: off
 import jax
 import jax.numpy as jnp
-from optax import update_moment, update_moment_per_elem_norm
-from optax._src.alias import _scale_by_learning_rate, ScalarOrSchedule
-from optax._src import base, utils, combine, numerics
-from optax._src import transform
+from optax import update_moment_per_elem_norm
+from optax._src import base, combine, transform
+from optax._src.alias import ScalarOrSchedule, _scale_by_learning_rate
 from optax._src.transform import ScaleByRmsState
+
 
 def scale_by_rms_pytorch_style(
     decay: float = 0.9,
@@ -186,6 +187,7 @@ def rmsprop_pytorch_style(
        if momentum is not None else base.identity())
   )
 # fmt: on
+
 
 class ResidualBlock(nn.Module):
     channels: int
@@ -322,7 +324,9 @@ def rollout(
         storage_time = 0
         d2h_time = 0
         env_send_time = 0
-        num_steps_with_bootstrap = args.num_steps + 1 + int(len(storage) == 0) # num_steps + 1 to get the states for value bootstrapping.
+        num_steps_with_bootstrap = (
+            args.num_steps + 1 + int(len(storage) == 0)
+        )  # num_steps + 1 to get the states for value bootstrapping.
         # NOTE: `update != 2` is actually IMPORTANT — it allows us to start running policy collection
         # concurrently with the learning process. It also ensures the actor's policy version is only 1 step
         # behind the learner's policy version
@@ -533,7 +537,7 @@ if __name__ == "__main__":
                 ),
             ),
             every_k_schedule=args.gradient_accumulation_steps,
-        )
+        ),
     )
     agent_state = flax.jax_utils.replicate(agent_state, devices=learner_devices)
     print(network.tabulate(network_key, np.array([envs.single_observation_space.sample()])))
@@ -555,7 +559,6 @@ if __name__ == "__main__":
         mean_per_batch = jax.vmap(rlax.policy_gradient_loss, in_axes=1)(logits, *args)
         total_loss_per_batch = mean_per_batch * logits.shape[0]
         return jnp.sum(total_loss_per_batch)
-
 
     def entropy_loss_fn(logits, *args):
         """rlax.entropy_loss, but with sum(loss) and [T, B, ...] inputs."""
@@ -593,7 +596,6 @@ if __name__ == "__main__":
         total_loss += args.ent_coef * ent_loss
         return total_loss, (pg_loss, baseline_loss, ent_loss)
 
-
     @jax.jit
     def single_device_update(
         agent_state: TrainState,
@@ -617,6 +619,7 @@ if __name__ == "__main__":
             grads = jax.lax.pmean(grads, axis_name="local_devices")
             agent_state = agent_state.apply_gradients(grads=grads)
             return agent_state, (loss, pg_loss, v_loss, entropy_loss)
+
         agent_state, (loss, pg_loss, v_loss, entropy_loss) = jax.lax.scan(
             update_minibatch,
             agent_state,
