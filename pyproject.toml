@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "cleanba"
-version = "1.0.0b2"
+version = "1.0.0b3"
 description = ""
 authors = ["Costa Huang <costa.huang@outlook.com>"]
 readme = "README.md"

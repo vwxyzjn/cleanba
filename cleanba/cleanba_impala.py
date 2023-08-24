@@ -719,10 +719,10 @@ if __name__ == "__main__":
             writer.add_scalar(
                 "charts/learning_rate", agent_state.opt_state[2][1].hyperparams["learning_rate"][-1].item(), global_step
             )
-            writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
-            writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
-            writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
-            writer.add_scalar("losses/loss", loss.item(), global_step)
+            writer.add_scalar("losses/value_loss", v_loss[-1].item(), global_step)
+            writer.add_scalar("losses/policy_loss", pg_loss[-1].item(), global_step)
+            writer.add_scalar("losses/entropy", entropy_loss[-1].item(), global_step)
+            writer.add_scalar("losses/loss", loss[-1].item(), global_step)
         if learner_policy_version >= args.num_updates:
             break
 
