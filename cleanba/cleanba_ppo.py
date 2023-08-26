@@ -552,7 +552,7 @@ if __name__ == "__main__":
             agent_state.params.critic_params, network.apply(agent_state.params.network_params, next_obs)
         ).squeeze()
 
-        advantages = jnp.zeros((args.local_num_envs,))
+        advantages = jnp.zeros((args.local_num_envs * args.num_actor_threads,))
         dones = jnp.concatenate([storage.dones, next_done[None, :]], axis=0)
         values = jnp.concatenate([storage.values, next_value[None, :]], axis=0)
         _, advantages = jax.lax.scan(
