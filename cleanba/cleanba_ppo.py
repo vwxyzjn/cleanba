@@ -62,7 +62,7 @@ class Args:
     "total timesteps of the experiments"
     learning_rate: float = 2.5e-4
     "the learning rate of the optimizer"
-    local_num_envs: int = 60
+    local_num_envs: int = 64
     "the number of parallel game environments"
     num_actor_threads: int = 2
     "the number of actor threads to use"
