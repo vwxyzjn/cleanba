@@ -561,7 +561,7 @@ if __name__ == "__main__":
         return advantages, advantages + storage.values
 
     def ppo_loss(params, obs, actions, behavior_logprobs, firststeps, advantages, target_values):
-        newlogprob, entropy, newvalue = jax.vmap(get_logprob_entropy_value, in_axes=(None, 0, 0))(params, obs, actions)
+        newlogprob, entropy, newvalue = get_logprob_entropy_value(params, obs, actions)
         logratio = newlogprob - behavior_logprobs
         ratio = jnp.exp(logratio)
         approx_kl = ((ratio - 1) - logratio).mean()
@@ -589,14 +589,36 @@ if __name__ == "__main__":
         next_obs = jnp.concatenate(sharded_next_obs)
         next_done = jnp.concatenate(sharded_next_done)
         ppo_loss_grad_fn = jax.value_and_grad(ppo_loss, has_aux=True)
-        advantages, target_values = compute_gae(agent_state, next_obs, next_done, storage)
-        # NOTE: notable implementation difference: we normalize advantage at the batch level
+        local_advantages, target_values = compute_gae(agent_state, next_obs, next_done, storage)
+        # NOTE: advantage normalization at the mini-batch level across devices
         if args.norm_adv:
-            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+            all_advantages = jax.lax.all_gather(local_advantages, axis_name="local_devices")
+            advantages = jnp.hstack(all_advantages)
+            advantages = advantages.reshape(advantages.shape[0], args.num_minibatches, -1)
+            advantages = (advantages - advantages.mean((0, -1), keepdims=True)) / (advantages.std((0, -1), keepdims=True) + 1e-8)
+            advantages = advantages.reshape(advantages.shape[0], -1)
+            local_advantages = jnp.hsplit(advantages, all_advantages.shape[0])[jax.process_index()]
+
 
         def update_epoch(carry, _):
             agent_state, key = carry
             key, subkey = jax.random.split(key)
+
+            def flatten(x):
+                return x.reshape((-1,) + x.shape[2:])
+
+            # taken from: https://github.com/google/brax/blob/main/brax/training/agents/ppo/train.py
+            def convert_data(x: jnp.ndarray):
+                x = jax.random.permutation(subkey, x)
+                x = jnp.reshape(x, (args.num_minibatches * args.gradient_accumulation_steps, -1) + x.shape[1:])
+                return x
+
+            flatten_storage = jax.tree_map(flatten, storage)
+            flatten_advantages = flatten(local_advantages)
+            flatten_target_values = flatten(target_values)
+            shuffled_storage = jax.tree_map(convert_data, flatten_storage)
+            shuffled_advantages = convert_data(flatten_advantages)
+            shuffled_target_values = convert_data(flatten_target_values)
 
             def update_minibatch(agent_state, minibatch):
                 mb_obs, mb_actions, mb_behavior_logprobs, mb_firststeps, mb_advantages, mb_target_values = minibatch
@@ -617,12 +639,12 @@ if __name__ == "__main__":
                 update_minibatch,
                 agent_state,
                 (
-                    jnp.array(jnp.split(storage.obs, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
-                    jnp.array(jnp.split(storage.actions, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
-                    jnp.array(jnp.split(storage.logprobs, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
-                    jnp.array(jnp.split(storage.firststeps, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
-                    jnp.array(jnp.split(advantages, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
-                    jnp.array(jnp.split(target_values, args.num_minibatches * args.gradient_accumulation_steps, axis=1)),
+                    shuffled_storage.obs,
+                    shuffled_storage.actions,
+                    shuffled_storage.logprobs,
+                    shuffled_storage.firststeps,
+                    shuffled_advantages,
+                    shuffled_target_values,
                 ),
             )
             return (agent_state, key), (loss, pg_loss, v_loss, entropy_loss, approx_kl)
