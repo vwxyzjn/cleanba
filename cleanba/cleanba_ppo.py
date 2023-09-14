@@ -101,7 +101,7 @@ class Args:
     "the device ids that learner workers will use"
     distributed: bool = False
     "whether to use `jax.distirbuted`"
-    concurrency: bool = True
+    concurrency: bool = False
     "whether to run the actor and learner concurrently"
 
     # runtime arguments to be filled in

@@ -1,3 +1,8 @@
+*.pdf
+*.svg
+static/cleanba/*.md
+.DS_Store
+
 slurm
 wandb
 videos
