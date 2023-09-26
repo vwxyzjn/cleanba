@@ -86,7 +86,7 @@ python -m cleanrl_utils.benchmark \
 
 Please see `benchmark.sh` for the commands to reproduce all of our results. 
 
-The commands to reproduce the TPU experiments can be found in `tpu.sh`. Here is a video demonstrating the orchastration of TPU experiments.
+The commands to reproduce the TPU experiments can be found in `tpu.sh`. Here is a video demonstrating the orchestration of TPU experiments.
 
 https://user-images.githubusercontent.com/5555347/227632573-137e4d72-4a31-4a06-b9e5-784abebe6c2b.mov
 
@@ -110,53 +110,6 @@ Using an **earlier version** of the codebase, here are some runtime numbers for 
 | a0_l1 2_d1 (6 TPUv4 cores ) | 44.4206 |
 | a0_l1_d1 (4 TPUv4 cores) | 54.6161 |
 | a0_l1_d2 (8 TPUv4 cores) | 33.1134 |
-
-
-## How does Cleanba work?
-
-Cleanba addresses the reproducibility issue by making ensuring the actor's policy version is always **exactly one step behind the learner's policy version**. The idea is similar to [HTS-RL](https://arxiv.org/abs/2012.09849), but the executions are completely different.
-
-Here is a pseudo-code of Cleanba's core idea:
-
-
-```python
-rollout_queue = Queue.queue(len=1)
-param_queue = Queue.queue(len=1)
-
-def actor():
-    for iteration in range(1, num_iterations):
-        if iteration != 2:
-            params = param_queue.get()
-        data = rollout(params)
-        rollout_queue.put(data)
-
-def learner():
-    for iteration in range(1, num_iterations):
-        data = rollout_queue.get()
-        agent.learn(data)
-        param_queue.put(agent.param)
-
-agent = Agent()
-param_queue.put(agent.param)
-threading.thread(actor).start()
-threading.thread(learner).start()
-```
-
-
-Notice that the `iteration != 2` ensures actor is exactly 1 policy behind learner's latest policy.
-
-
-Let us use `pi` to denote policy of version `i`, `di` the rollout data of version `i`. Then we have
-
-```
- iteration: 1       2       3 
- actor:     p1->d1  p1->d2  p2->d3
- learner:           d1->p2  d2->p3
-```
-
-In the second iteration, we skipped the `param_queue.get()` call, so `p1->d2` happens concurrently with `d1->p2`. Because `get()` and `put()` operations are blocking and we have the queue sizes to be 1, we made sure actor's policy version is exactly 1 version preceding the learner's policy version.
-
-To improve efficiency of Cleanba, we uses JAX and EnvPool, both of which are designed to be efficient. To improve scalability, we allow using multiple learner devices via `pmap` and use `jax.distibuted` to distribute to N-machines.
 
 
 ## Detailed performance
