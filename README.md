@@ -1,45 +1,27 @@
-# Cleanba: A Reproducible, Efficient, Scalable, Distributed Deep Reinforcement Learning Framework
+# Cleanba: A Reproducible and Efficient Distributed Reinforcement Learning Platform
 
-Cleanba is CleanRL's implementation of DeepMind's Sebulba distributed training framework, but with a few different design choices to make distributed RL more reproducible and transparent to use.
+Cleanba is **Clean**RL-style implementation of DeepMind's Sebul**ba** distributed training framework, but with a few different design choices to make distributed RL more reproducible and transparent to use.
 
->**Warning** This repo is a **WIP** made public because it's easier for me to share pointers with collaborators. We are still working on the documentation, the codebase, and some internal development. Please feel free to open an issue if you have any questions or suggestions.
 
 >**Warning** This repo is intended for archiving purposes. Once the codebase is stable, we will move it to [CleanRL](https://github.com/vwxyzjn/cleanrl) for future maintenance.
 
-![](static/hns.png)
 
 
 ## Highlights
 
-
-**Highly reproducible**: More GPUs only make things faster. You can always reproduce the same results with different hardwares (e.g., different number of GPUs, TPUs).
-
-![](static/reproducibility.png)
-
-|             | runtime (minutes) in `Breakout-v5` |
-|:------------|------------:|
-| baseline (8 A100) | 30.4671 |
-| a0_l0_d1 (1 A100) | 154.079 |
-| a0_l0_d2 (2 A100) | 93.3155 |
-| a0_l1_d1 (2 A100) | 121.107 |
-| a0_l01_d1 (2 A100) | 101.63 |
-| a0_l1 2_d1 (3 A100) | 70.2993 |
-| a0_l1 2 3_d1 (4 A100) | 52.5321 |
-| a0_l0_d4 (4 A100) | 58.4344 |
-| a0_l1 2 3 4_d1 (5 A100) | 44.8671 |
-| a0_l1 2 3 4 5 6_d1 (7 A100) | 38.4216 |
-| a0_l1 2 3 4 5 6_d1 (7 TPUv3-8 cores) | 124.397 |
-| a0_l1 2_d1 (6 TPUv4 cores ) | 44.4206 |
-| a0_l1_d1 (4 TPUv4 cores) | 54.6161 |
-| a0_l1_d2 (8 TPUv4 cores) | 33.1134 |
-
-**High-performing**: We can currently achieve 178.24% median human-normalized score across 57 Atari games in ~30 mins, with 8 GPUs (distributed 2 times on 4 GPUs). This is one of the shortest training durations compared to prior works.
+1. **Strong performance**: Cleanba's IMPALA and PPO achieve about 165% median HNS in Atari with sticky actions, matching `monobeast` IMPALA's 165% median HNS and outperforming `moolib` IMPALA's 140% median HNS.
+2. **Short training time**: Under the 1 GPU 10 CPU setting, Cleanba's IMPALA is **6.8x faster**  `monobeast`'s IMPALA and **1.2x faster** than `moolib`'s IMPALA. Under a max specification setting, Cleanba's IMPALA (8 GPU and 40 CPU) and **2x faster** than `moolib`'s IMPALA (8 GPU and 80 CPU) is **5x faster** than `monobeast`'s IMPALA (1 GPU and 80 CPU).
+![](static/cleanba/main_10CPU_aggregate.png)
+![](static/cleanba/main_10CPU_sample_walltime_efficiency.png)
+![](static/cleanba/spec_out_aggregate.png)
+![](static/cleanba/spec_out_sample_walltime_efficiency.png)
+3. **Highly reproducible**: Cleanba shows predictable and reproducible learning curves across 1 and 8 GPU settings given the same set of hyperparameters, whereas `moolib`'s learning curves can be considerably different, even if hyperparameters are controlled to be the same.
+![](static/cleanba/smootheness_complete_aggregate.png)
+![](static/cleanba/smootheness.png)
 
 
-**Scalable**: We can scale to hundreds of GPUs allowed by `jax.distributed` and memory. This makes cleanba suited for large-scale distributed training tasks.
 
-![](static/scalability.png)
-![](static/cleanba_scaling_efficiency.png)
+
 
 **Understandable**: We adopt the single-file implementation philosophy used in CleanRL, making our core codebase succinct and easy to understand. For example, our `cleanba/cleanba_ppo.py` is ~800 lines of code.
 
@@ -69,28 +51,28 @@ Here are come common setups. You can also run the commands with `--track` to tra
 
 ```
 # a0-l0-d1: single GPU
-python cleanba/cleanba_ppo.py --actor-device-ids 0 --learner-device-ids 0 --local-num-envs 120 --track
+python cleanba/cleanba_ppo.py --actor-device-ids 0 --learner-device-ids 0 --local-num-envs 60 --track
 # a0-l0,1-d1: two GPUs
-python cleanba/cleanba_ppo.py --actor-device-ids 0 --learner-device-ids 0 1 --local-num-envs 120
+python cleanba/cleanba_ppo.py --actor-device-ids 0 --learner-device-ids 0 1 --local-num-envs 60
 # a0-l1,2-d1: three GPUs
-python cleanba/cleanba_ppo.py --actor-device-ids 0 --learner-device-ids 1 2 --local-num-envs 120
+python cleanba/cleanba_ppo.py --actor-device-ids 0 --learner-device-ids 1 2 --local-num-envs 60
 # a0-l1,2,3-d1: four GPUs
 python cleanba/cleanba_ppo.py --actor-device-ids 0 --learner-device-ids 1 2 3
 # a0-l1,2,3,4-d1: five GPUs
-python cleanba/cleanba_ppo.py --actor-device-ids 0 --learner-device-ids 1 2 3 4 --local-num-envs 120
+python cleanba/cleanba_ppo.py --actor-device-ids 0 --learner-device-ids 1 2 3 4 --local-num-envs 60
 # a0-l1,2,3,4,5,6-d1: seven GPUs
-python cleanba/cleanba_ppo.py --actor-device-ids 0 --learner-device-ids 1 2 3 4 5 6 --local-num-envs 120
+python cleanba/cleanba_ppo.py --actor-device-ids 0 --learner-device-ids 1 2 3 4 5 6 --local-num-envs 60
 
 # a0-l0-d2: 8 GPUs (distributed 2 times on 4 GPUs)
 # execute them in separate terminals; here we assume all 8 GPUs are on the same machine
 # however it is possible to scale to hundreds of GPUs allowed by `jax.distributed`
-CUDA_VISIBLE_DEVICES="0,1,2,3" SLURM_JOB_ID=26017 SLURM_STEP_NODELIST=localhost SLURM_NTASKS=2 SLURM_PROCID=0 SLURM_LOCALID=0 SLURM_STEP_NUM_NODES=2 python cleanba/cleanba_ppo.py --distributed --actor-device-ids 0 --learner-device-ids 1 2 3
-CUDA_VISIBLE_DEVICES="4,5,6,7" SLURM_JOB_ID=26017 SLURM_STEP_NODELIST=localhost SLURM_NTASKS=2 SLURM_PROCID=1 SLURM_LOCALID=0 SLURM_STEP_NUM_NODES=2 python cleanba/cleanba_ppo.py --distributed --actor-device-ids 0 --learner-device-ids 1 2 3
+CUDA_VISIBLE_DEVICES="0,1,2,3" SLURM_JOB_ID=26017 SLURM_STEP_NODELIST=localhost SLURM_NTASKS=2 SLURM_PROCID=0 SLURM_LOCALID=0 SLURM_STEP_NUM_NODES=2 python cleanba/cleanba_ppo.py --distributed --actor-device-ids 0 --learner-device-ids 1 2 3 --local-num-envs 60
+CUDA_VISIBLE_DEVICES="4,5,6,7" SLURM_JOB_ID=26017 SLURM_STEP_NODELIST=localhost SLURM_NTASKS=2 SLURM_PROCID=1 SLURM_LOCALID=0 SLURM_STEP_NUM_NODES=2 python cleanba/cleanba_ppo.py --distributed --actor-device-ids 0 --learner-device-ids 1 2 3 --local-num-envs 60
 
 # if you have slurm it's possible to run the following
 python -m cleanrl_utils.benchmark \
     --env-ids Breakout-v5 \
-    --command "poetry run python cleanrl/cleanba_ppo.py --distributed --learner-device-ids 1 2 3 --track --save-model --upload-model" \
+    --command "poetry run python cleanrl/cleanba_ppo.py --distributed --learner-device-ids 1 2 3 --local-num-envs 60 --track --save-model --upload-model" \
     --num-seeds 1 \
     --workers 1 \
     --slurm-gpus-per-task 4 \
@@ -104,12 +86,30 @@ python -m cleanrl_utils.benchmark \
 
 Please see `benchmark.sh` for the commands to reproduce all of our results. 
 
-Almost all the experiments were conducted with the commit [32dbf31d706260b238307f8dfe409adef88ea8f7](`https://github.com/vwxyzjn/cleanba/commit/32dbf31d706260b238307f8dfe409adef88ea8f7`).
-
 The commands to reproduce the TPU experiments can be found in `tpu.sh`. Here is a video demonstrating the orchastration of TPU experiments.
 
 https://user-images.githubusercontent.com/5555347/227632573-137e4d72-4a31-4a06-b9e5-784abebe6c2b.mov
 
+Using an **earlier version** of the codebase, here are some runtime numbers for different hardware settings (GPUs TPUs).
+
+![](static/reproducibility.png)
+
+|             | runtime (minutes) in `Breakout-v5` |
+|:------------|------------:|
+| baseline (8 A100) | 30.4671 |
+| a0_l0_d1 (1 A100) | 154.079 |
+| a0_l0_d2 (2 A100) | 93.3155 |
+| a0_l1_d1 (2 A100) | 121.107 |
+| a0_l01_d1 (2 A100) | 101.63 |
+| a0_l1 2_d1 (3 A100) | 70.2993 |
+| a0_l1 2 3_d1 (4 A100) | 52.5321 |
+| a0_l0_d4 (4 A100) | 58.4344 |
+| a0_l1 2 3 4_d1 (5 A100) | 44.8671 |
+| a0_l1 2 3 4 5 6_d1 (7 A100) | 38.4216 |
+| a0_l1 2 3 4 5 6_d1 (7 TPUv3-8 cores) | 124.397 |
+| a0_l1 2_d1 (6 TPUv4 cores ) | 44.4206 |
+| a0_l1_d1 (4 TPUv4 cores) | 54.6161 |
+| a0_l1_d2 (8 TPUv4 cores) | 33.1134 |
 
 
 ## How does Cleanba work?
@@ -161,19 +161,12 @@ To improve efficiency of Cleanba, we uses JAX and EnvPool, both of which are des
 
 ## Detailed performance
 
-![](static/cleanrl_sebulba_ppo_vs_baselines-time.png)
-
-## Where is the number coming from?
-
-[Espeholt et al., 2018](https://arxiv.org/abs/1802.01561) did not disclose the hardware usage and runtime for the Atari experiments. We did our best to recover its runtime by interpolating the results from the [R2D2 paper](https://openreview.net/pdf?id=r1lyTjAqYX) and found IMPALA (deep) takes ~2 hours.
-
-![](static/r2d2_impala.png)
-
-[SEED RL's R2D2](https://github.com/google-research/seed_rl)'s performance is extracted from its [paper](https://arxiv.org/abs/1910.06591):
-![](static/r2d2.png)
+The complete learning curves can be found in the `static/cleanba` folder. `static/cleanba/plot.sh` contains the plotting script.
 
 ## Acknowledgements
 
-We thank  for generously providing the computational resources for this project.
+We thank 
 
-We thank [Stability AI's HPC](https://github.com/Stability-AI/stability-hpc) for generously providing the GPU computational resources to this project. We also thank [Google's TPU Research Cloud](https://sites.research.google/trc/about/) for providing the TPU computational resources. 
+* [Stability AI's HPC](https://github.com/Stability-AI/stability-hpc) for generously providing much GPU computational resources to this project.
+* [Hugging Face](https://huggingface.co/)'s cluster for providing much GPU computational resources to this project.
+* [Google's TPU Research Cloud](https://sites.research.google/trc/about/) for providing the TPU computational resources. 
