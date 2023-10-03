@@ -1,6 +1,6 @@
 # Cleanba: A Reproducible and Efficient Distributed Reinforcement Learning Platform
 
-### <a href="https://github.com/vwxyzjn/cleanba/blob/main/static/Cleanba_paper.pdf" target="_blank">[Paper]</a> 
+### <a href="https://arxiv.org/abs/2310.00036" target="_blank">[Paper]</a> 
 
 Cleanba is **Clean**RL-style implementation of DeepMind's Sebul**ba** distributed training platform, but with a few different design choices to make distributed RL more reproducible and transparent to use.
 
