@@ -124,4 +124,18 @@ We thank
 
 * [Stability AI's HPC](https://github.com/Stability-AI/stability-hpc) for generously providing much GPU computational resources to this project.
 * [Hugging Face](https://huggingface.co/)'s cluster for providing much GPU computational resources to this project.
-* [Google's TPU Research Cloud](https://sites.research.google/trc/about/) for providing the TPU computational resources. 
+* [Google's TPU Research Cloud](https://sites.research.google/trc/about/) for providing the TPU computational resources.
+
+
+## Citation
+
+```bibtex
+@misc{huang2023cleanba,
+      title={Cleanba: A Reproducible and Efficient Distributed Reinforcement Learning Platform}, 
+      author={Shengyi Huang and Jiayi Weng and Rujikorn Charakorn and Min Lin and Zhongwen Xu and Santiago Ontañón},
+      year={2023},
+      eprint={2310.00036},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG}
+}
+```
