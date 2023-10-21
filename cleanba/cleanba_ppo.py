@@ -17,7 +17,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import rlax
 import tyro
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
@@ -552,7 +551,7 @@ if __name__ == "__main__":
             agent_state.params.critic_params, network.apply(agent_state.params.network_params, next_obs)
         ).squeeze()
 
-        advantages = jnp.zeros((args.local_num_envs * args.num_actor_threads,))
+        advantages = jnp.zeros_like(next_value)
         dones = jnp.concatenate([storage.dones, next_done[None, :]], axis=0)
         values = jnp.concatenate([storage.values, next_value[None, :]], axis=0)
         _, advantages = jax.lax.scan(
@@ -590,15 +589,9 @@ if __name__ == "__main__":
         next_done = jnp.concatenate(sharded_next_done)
         ppo_loss_grad_fn = jax.value_and_grad(ppo_loss, has_aux=True)
         local_advantages, target_values = compute_gae(agent_state, next_obs, next_done, storage)
-        # NOTE: advantage normalization at the mini-batch level across devices
+        # NOTE: slightly different impl: batch-level advantage normalization instead of per-minibatch normalization
         if args.norm_adv:
-            all_advantages = jax.lax.all_gather(local_advantages, axis_name="local_devices")
-            advantages = jnp.hstack(all_advantages)
-            advantages = advantages.reshape(advantages.shape[0], args.num_minibatches, -1)
-            advantages = (advantages - advantages.mean((0, -1), keepdims=True)) / (advantages.std((0, -1), keepdims=True) + 1e-8)
-            advantages = advantages.reshape(advantages.shape[0], -1)
-            local_advantages = jnp.hsplit(advantages, all_advantages.shape[0])[jax.process_index()]
-
+            local_advantages = (local_advantages - local_advantages.mean()) / (local_advantages.std() + 1e-8)
 
         def update_epoch(carry, _):
             agent_state, key = carry
