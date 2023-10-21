@@ -588,10 +588,11 @@ if __name__ == "__main__":
         next_obs = jnp.concatenate(sharded_next_obs)
         next_done = jnp.concatenate(sharded_next_done)
         ppo_loss_grad_fn = jax.value_and_grad(ppo_loss, has_aux=True)
-        local_advantages, target_values = compute_gae(agent_state, next_obs, next_done, storage)
-        # NOTE: slightly different impl: batch-level advantage normalization instead of per-minibatch normalization
-        if args.norm_adv:
-            local_advantages = (local_advantages - local_advantages.mean()) / (local_advantages.std() + 1e-8)
+        advantages, target_values = compute_gae(agent_state, next_obs, next_done, storage)
+        if args.norm_adv: # NOTE: per-minibatch advantages normalization
+            advantages = advantages.reshape(advantages.shape[0], args.num_minibatches, -1)
+            advantages = (advantages - advantages.mean((0, -1), keepdims=True)) / (advantages.std((0, -1), keepdims=True) + 1e-8)
+            advantages = advantages.reshape(advantages.shape[0], -1)
 
         def update_epoch(carry, _):
             agent_state, key = carry
@@ -607,7 +608,7 @@ if __name__ == "__main__":
                 return x
 
             flatten_storage = jax.tree_map(flatten, storage)
-            flatten_advantages = flatten(local_advantages)
+            flatten_advantages = flatten(advantages)
             flatten_target_values = flatten(target_values)
             shuffled_storage = jax.tree_map(convert_data, flatten_storage)
             shuffled_advantages = convert_data(flatten_advantages)
