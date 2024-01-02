@@ -767,7 +767,7 @@ if __name__ == "__main__":
                 args,
                 episodic_returns,
                 repo_id,
-                "PPO",
+                "IMPALA",
                 f"runs/{run_name}",
                 f"videos/{run_name}-eval",
                 extra_dependencies=["jax", "envpool", "atari"],
