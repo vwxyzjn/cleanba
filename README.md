@@ -118,6 +118,75 @@ Using an **earlier version** of the codebase, here are some runtime numbers for 
 
 The complete learning curves can be found in the `static/cleanba` folder. `static/cleanba/plot.sh` contains the plotting script.
 
+
+
+## Pseudocode 
+
+```python
+import queue
+import threading
+
+class Agent():
+    def __init__(self):
+        self.param = 1
+
+    def learn(self, data):
+        self.param += 1
+
+ITER = 7
+batch_size = 32
+agent = Agent()
+data_Q = queue.Queue(maxsize=1)
+param_Q = queue.Queue(maxsize=1)
+def actor():
+    for i in range(1, ITER):
+        if i != 2:
+            params = param_Q.get()
+            print(f"[actor] get π_{params}")
+        data = params
+        data_Q.put(data)
+        print(f"[actor] put π_{params} -> D_π_{data}")
+
+actor_thread = threading.Thread(target=actor)
+actor_thread.start()
+
+# initial param put
+param_Q.put(agent.param)
+
+# cleanba style stuff
+for _ in range(1, ITER - 1):
+    data = data_Q.get()
+    print(f"[leaner] get D_π_{data}")
+    old_param = agent.param
+    agent.learn(data)
+    param_Q.put(agent.param)
+    print(f"[leaner] get π_{old_param} -> D_π_{data} -> π_{agent.param}")
+actor_thread.join()
+```
+```
+[actor] get π_1
+[actor] put π_1 -> D_π_1
+[leaner] get D_π_1
+[actor] put π_1 -> D_π_1
+[leaner] get π_1 -> D_π_1 -> π_2
+[actor] get π_2
+[leaner] get D_π_1
+[actor] put π_2 -> D_π_2
+[leaner] get π_2 -> D_π_1 -> π_3
+[actor] get π_3
+[leaner] get D_π_2
+[actor] put π_3 -> D_π_3
+[leaner] get π_3 -> D_π_2 -> π_4
+[actor] get π_4
+[leaner] get D_π_3
+[actor] put π_4 -> D_π_4
+[leaner] get π_4 -> D_π_3 -> π_5
+[actor] get π_5
+[leaner] get D_π_4
+[actor] put π_5 -> D_π_5
+[leaner] get π_5 -> D_π_4 -> π_6
+```
+
 ## Acknowledgements
 
 We thank 
